@@ -55,6 +55,8 @@ enum yt921x_tag_code {
 	YT921X_TAG_CODE_FDB_COPY = 0x1c,
 };
 
+#define dsa_xmit_port_mask(skb, netdev) BIT(dsa_user_to_port(netdev)->index)
+
 static struct sk_buff *
 yt921x_tag_xmit(struct sk_buff *skb, struct net_device *netdev)
 {
