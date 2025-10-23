@@ -2679,7 +2679,8 @@ yt921x_port_config(struct yt921x_priv *priv, int port, unsigned int mode,
 		mask = YT921X_SERDES_MODE_M;
 		switch (interface) {
 		case PHY_INTERFACE_MODE_SGMII:
-			ctrl = YT921X_SERDES_MODE_SGMII;
+			/* abuse SGMII for REVSGMII */
+			ctrl = YT921X_SERDES_MODE_REVSGMII;
 			break;
 		case PHY_INTERFACE_MODE_100BASEX:
 			ctrl = YT921X_SERDES_MODE_100BASEX;
