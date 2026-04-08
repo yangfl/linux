@@ -1737,8 +1737,11 @@ yt921x_acl_parse_key(struct yt921x_acl_entry *group, u8 ports_mask,
 	}
 
 	/* Finish */
-	for (unsigned int i = 0; i < size; i++)
+	for (unsigned int i = 0; i < size; i++) {
+		group[i].mask[1] |= YT921X_ACL_KEYb_TYPE_M;
 		group[i].key[1] |= YT921X_ACL_KEYb_SPORTS(ports_mask);
+		group[i].mask[1] |= YT921X_ACL_KEYb_SPORTS(ports_mask);
+	}
 
 	for (unsigned int i = 1; i < size; i++)
 		group[i].type = U32_MAX;
