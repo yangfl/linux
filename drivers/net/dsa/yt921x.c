@@ -1856,7 +1856,7 @@ yt921x_acl_commit(struct yt921x_priv *priv, unsigned int blkid, u8 ents_mask,
 
 	/* Select entries to be written */
 	ctrl = 0;
-	for (unsigned int i = 0; i < YT921X_ACL_BLK_NUM; i++)
+	for (unsigned int i = 0; i < YT921X_ACL_ENT_PER_BLK; i++)
 		ctrl |= YT921X_ACL_BLK_KEEP_KEEPn(i);
 	mask = ents_mask;
 	for_each_set_bit(i, &mask, YT921X_ACL_ENT_PER_BLK)
