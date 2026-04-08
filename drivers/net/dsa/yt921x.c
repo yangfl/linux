@@ -2043,6 +2043,8 @@ yt921x_dsa_cls_flower_add(struct dsa_switch *ds, int port,
 	size = yt921x_acl_parse(group, BIT(port), cls, ingress);
 	if (!size)
 		return -EOPNOTSUPP;
+	for (unsigned int i = 0; i < size; i++)
+		group[i].cookie = cls->cookie;
 
 	mutex_lock(&priv->reg_lock);
 	res = yt921x_acl_add(priv, group, size, extack);
