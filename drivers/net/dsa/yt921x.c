@@ -1801,6 +1801,7 @@ yt921x_acl_parse(struct yt921x_acl_entry *group, u8 ports_mask,
 		 const struct flow_cls_offload *cls, bool ingress)
 {
 	struct netlink_ext_ack *extack = cls->common.extack;
+	unsigned int size;
 	int res;
 
 	if (!ingress) {
@@ -1808,11 +1809,15 @@ yt921x_acl_parse(struct yt921x_acl_entry *group, u8 ports_mask,
 		return 0;
 	}
 
+	size = yt921x_acl_parse_key(group, ports_mask, cls);
+	if (!size)
+		return 0;
+
 	res = yt921x_acl_parse_action(group, cls);
 	if (res)
 		return 0;
 
-	return yt921x_acl_parse_key(group, ports_mask, cls);
+	return size;
 }
 
 static unsigned int
