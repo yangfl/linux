@@ -373,6 +373,11 @@ yt921x_regs_clear_bits(struct yt921x_priv *priv, u32 reg, const u32 *masks,
 	return yt921x_regs_write(priv, reg, vs, num_regs);
 }
 
+static int yt921x_reg64_read(struct yt921x_priv *priv, u32 reg, u32 *vals)
+{
+	return yt921x_regs_read(priv, reg, vals, 2);
+}
+
 static int
 yt921x_reg64_write(struct yt921x_priv *priv, u32 reg, const u32 *vals)
 {
@@ -2051,6 +2056,7 @@ yt921x_acl_rule_ext_parse_action(struct yt921x_acl_rule_ext *ruleext,
 	struct netlink_ext_ack *extack = cls->common.extack;
 	const struct flow_action_entry *act;
 	u32 *action = ruleext->r.action;
+	unsigned int statid;
 	int res;
 	int i;
 
@@ -2120,6 +2126,12 @@ yt921x_acl_rule_ext_parse_action(struct yt921x_acl_rule_ext *ruleext,
 			return -EOPNOTSUPP;
 		}
 
+	statid = find_first_zero_bit(priv->flowstats_map, YT921X_FLOWSTAT_NUM);
+	if (statid < YT921X_FLOWSTAT_NUM) {
+		action[0] |= YT921X_ACL_ACTa_FLOWSTAT_EN |
+			     YT921X_ACL_ACTa_FLOWSTAT_ID(statid);
+	}
+
 	return 0;
 }
 
@@ -2163,6 +2175,39 @@ yt921x_acl_find(const struct yt921x_priv *priv, unsigned long cookie)
 	}
 
 	return UINT_MAX;
+}
+
+static int
+yt921x_acl_stat(struct yt921x_priv *priv, unsigned long cookie, u64 *statp)
+{
+	const struct yt921x_acl_rule *aclrule;
+	const struct yt921x_acl_blk *aclblk;
+	unsigned int statid;
+	unsigned int binid;
+	unsigned int blkid;
+	unsigned int entid;
+	u32 vals[2];
+	int res;
+
+	entid = yt921x_acl_find(priv, cookie);
+	if (entid == UINT_MAX)
+		return -ENOENT;
+
+	blkid = entid / YT921X_ACL_ENT_PER_BLK;
+	binid = entid % YT921X_ACL_ENT_PER_BLK;
+	aclblk = priv->acl_blks[blkid];
+	aclrule = aclblk->rules[binid];
+
+	if (!(aclrule->action[0] & YT921X_ACL_ACTa_FLOWSTAT_EN))
+		return -EOPNOTSUPP;
+
+	statid = FIELD_GET(YT921X_ACL_ACTa_FLOWSTAT_ID_M, aclrule->action[0]);
+	res = yt921x_reg64_read(priv, YT921X_FLOWSTATn_STAT(statid), vals);
+	if (res)
+		return res;
+
+	*statp = ((u64)vals[1] << 32) | vals[0];
+	return 0;
 }
 
 static int
@@ -2318,6 +2363,10 @@ static int yt921x_acl_del(struct yt921x_priv *priv, unsigned long cookie)
 		clear_bit(FIELD_GET(YT921X_ACL_ACTa_METER_ID_M,
 				    aclrule->action[0]),
 			  priv->meters_map);
+	if (aclrule->action[0] & YT921X_ACL_ACTa_FLOWSTAT_EN)
+		clear_bit(FIELD_GET(YT921X_ACL_ACTa_FLOWSTAT_ID_M,
+				    aclrule->action[0]),
+			  priv->flowstats_map);
 	priv->acl_masks[blkid] &= ~aclrule->mask;
 	devm_kfree(dev, aclrule);
 	if (!priv->acl_masks[blkid]) {
@@ -2341,6 +2390,7 @@ yt921x_acl_add(struct yt921x_priv *priv,
 	unsigned int blkid;
 	unsigned int entid;
 	unsigned int o;
+	u32 ctrl;
 	int res;
 
 	entid = yt921x_acl_reserve(priv, entscnt, extack);
@@ -2352,6 +2402,22 @@ yt921x_acl_add(struct yt921x_priv *priv,
 						 ruleext->r.action[0]);
 
 		res = yt921x_meter_config(priv, meterid, &ruleext->marker);
+		if (res)
+			return res;
+	}
+	if (ruleext->r.action[0] & YT921X_ACL_ACTa_FLOWSTAT_EN) {
+		unsigned int statid = FIELD_GET(YT921X_ACL_ACTa_FLOWSTAT_ID_M,
+						ruleext->r.action[0]);
+		u32 zeros[2] = {};
+
+		ctrl = YT921X_FLOWSTAT_CTRL_EN | YT921X_FLOWSTAT_CTRL_TYPE_FLOW;
+		res = yt921x_reg_write(priv, YT921X_FLOWSTATn_CTRL(statid),
+				       ctrl);
+		if (res)
+			return res;
+
+		res = yt921x_reg64_write(priv, YT921X_FLOWSTATn_STAT(statid),
+					 zeros);
 		if (res)
 			return res;
 	}
@@ -2396,6 +2462,10 @@ yt921x_acl_add(struct yt921x_priv *priv,
 		set_bit(FIELD_GET(YT921X_ACL_ACTa_METER_ID_M,
 				  aclrule->action[0]),
 			priv->meters_map);
+	if (aclrule->action[0] & YT921X_ACL_ACTa_FLOWSTAT_EN)
+		set_bit(FIELD_GET(YT921X_ACL_ACTa_FLOWSTAT_ID_M,
+				  aclrule->action[0]),
+			priv->flowstats_map);
 	priv->acl_masks[blkid] |= aclrule->mask;
 	return 0;
 
@@ -2405,6 +2475,25 @@ err:
 		priv->acl_blks[blkid] = NULL;
 	}
 	return res;
+}
+
+static int
+yt921x_dsa_cls_flower_stats(struct dsa_switch *ds, int port,
+			    struct flow_cls_offload *cls, bool ingress)
+{
+	struct yt921x_priv *priv = to_yt921x_priv(ds);
+	int res;
+
+	mutex_lock(&priv->reg_lock);
+	res = yt921x_acl_stat(priv, cls->cookie, &cls->stats.bytes);
+	mutex_unlock(&priv->reg_lock);
+
+	if (res)
+		return res;
+
+	cls->stats.used_hw_stats = FLOW_ACTION_HW_STATS_IMMEDIATE;
+	cls->stats.used_hw_stats_valid = true;
+	return 0;
 }
 
 static int
@@ -4781,6 +4870,7 @@ static const struct dsa_switch_ops yt921x_dsa_switch_ops = {
 	.port_policer_add	= yt921x_dsa_port_policer_add,
 	.port_setup_tc		= yt921x_dsa_port_setup_tc,
 	/* acl */
+	.cls_flower_stats	= yt921x_dsa_cls_flower_stats,
 	.cls_flower_del		= yt921x_dsa_cls_flower_del,
 	.cls_flower_add		= yt921x_dsa_cls_flower_add,
 	/* hsr */
