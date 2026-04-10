@@ -1705,6 +1705,9 @@ yt921x_acl_entries_find(struct yt921x_acl_entry *entries, unsigned int *sizep,
 struct yt921x_acl_rule_ext {
 	struct yt921x_acl_rule r;
 
+	u32 udfs_ctrl[YT921X_UDF_NUM];
+	unsigned int udfs_cnt;
+
 	struct yt921x_marker marker;
 };
 
@@ -2316,6 +2319,48 @@ yt921x_acl_commit(struct yt921x_priv *priv, unsigned int entid, u8 entsmask)
 	return 0;
 }
 
+static int
+yt921x_acl_remap_udf(struct yt921x_priv *priv, const u32 *udfs,
+		     unsigned int cnt, struct netlink_ext_ack *extack,
+		     unsigned char *remap)
+{
+	u32 ctrls[YT921X_UDF_NUM];
+	u8 used = 0;
+
+	if (!cnt)
+		return 0;
+
+	memcpy(ctrls, priv->udfs_ctrl, sizeof(ctrls));
+	for (unsigned int i = 0; i < YT921X_UDF_NUM; i++)
+		if (priv->udfs_refcnt[i])
+			used |= BIT(i);
+
+	for (unsigned int i = 0; i < cnt; i++) {
+		u32 udf = udfs[i];
+		unsigned int j;
+
+		for (j = 0; j < YT921X_UDF_NUM; j++)
+			if ((used & BIT(j)) && ctrls[j] == udf)
+				break;
+
+		if (j >= YT921X_UDF_NUM) {
+			j = ffz(used);
+			if (j >= YT921X_UDF_NUM) {
+				NL_SET_ERR_MSG_MOD(extack,
+						   "UDF entry limit reached");
+				return -EOPNOTSUPP;
+			}
+
+			used |= BIT(j);
+			ctrls[j] = udf;
+		}
+
+		remap[i] = j;
+	}
+
+	return 0;
+}
+
 static unsigned int
 yt921x_acl_reserve(struct yt921x_priv *priv, unsigned int entscnt,
 		   struct netlink_ext_ack *extack)
@@ -2389,6 +2434,20 @@ static int yt921x_acl_del(struct yt921x_priv *priv, unsigned long cookie)
 		clear_bit(FIELD_GET(YT921X_ACL_ACTa_FLOWSTAT_ID_M,
 				    aclrule->action[0]),
 			  priv->flowstats_map);
+	for (unsigned int i = 0; i < hweight8(aclrule->mask); i++) {
+		u32 type = FIELD_GET(YT921X_ACL_KEYb_TYPE_M,
+				     aclrule->entries[i].key[1]);
+		unsigned int o;
+
+		if (!(YT921X_ACL_TYPE_UDF0 <= type &&
+		      type <= YT921X_ACL_TYPE_UDF7))
+			continue;
+
+		o = type - YT921X_ACL_TYPE_UDF0;
+
+		WARN_ON(priv->udfs_refcnt[o] == 0);
+		priv->udfs_refcnt[o]--;
+	}
 	priv->acl_masks[blkid] &= ~aclrule->mask;
 	devm_kfree(dev, aclrule);
 	if (!priv->acl_masks[blkid]) {
@@ -2404,6 +2463,7 @@ yt921x_acl_add(struct yt921x_priv *priv,
 	       struct netlink_ext_ack *extack)
 {
 	unsigned int entscnt = hweight8(ruleext->r.mask);
+	unsigned char udfs_remap[YT921X_UDF_NUM];
 	struct device *dev = to_device(priv);
 	struct yt921x_acl_rule *aclrule;
 	struct yt921x_acl_blk *aclblk;
@@ -2415,6 +2475,10 @@ yt921x_acl_add(struct yt921x_priv *priv,
 	u32 ctrl;
 	int res;
 
+	res = yt921x_acl_remap_udf(priv, ruleext->udfs_ctrl, ruleext->udfs_cnt,
+				   extack, udfs_remap);
+	if (res)
+		return res;
 	entid = yt921x_acl_reserve(priv, entscnt, extack);
 	if (entid == UINT_MAX)
 		return -EOPNOTSUPP;
@@ -2440,6 +2504,17 @@ yt921x_acl_add(struct yt921x_priv *priv,
 
 		res = yt921x_reg64_write(priv, YT921X_FLOWSTATn_STAT(statid),
 					 zeros);
+		if (res)
+			return res;
+	}
+	for (unsigned int i = 0; i < ruleext->udfs_cnt; i++) {
+		unsigned int o = udfs_remap[i];
+
+		if (priv->udfs_refcnt[o])
+			continue;
+
+		res = yt921x_reg_write(priv, YT921X_UDFn_CTRL(o),
+				       ruleext->udfs_ctrl[i]);
 		if (res)
 			return res;
 	}
@@ -2471,6 +2546,19 @@ yt921x_acl_add(struct yt921x_priv *priv,
 		if (!entscnt)
 			break;
 	}
+	for (unsigned int i = 0; i < hweight8(aclrule->mask); i++) {
+		u32 type = FIELD_GET(YT921X_ACL_KEYb_TYPE_M,
+				     aclrule->entries[i].key[1]);
+
+		if (!(YT921X_ACL_TYPE_UDF0 <= type &&
+		      type <= YT921X_ACL_TYPE_UDF7))
+			continue;
+
+		u32p_replace_bits(&aclrule->entries[i].key[1],
+				  YT921X_ACL_TYPE_UDF0 +
+				  udfs_remap[type - YT921X_ACL_TYPE_UDF0],
+				  YT921X_ACL_KEYb_TYPE_M);
+	}
 
 	aclblk->rules[binid] = aclrule;
 	res = yt921x_acl_commit(priv, entid, aclrule->mask);
@@ -2488,6 +2576,13 @@ yt921x_acl_add(struct yt921x_priv *priv,
 		set_bit(FIELD_GET(YT921X_ACL_ACTa_FLOWSTAT_ID_M,
 				  aclrule->action[0]),
 			priv->flowstats_map);
+	for (unsigned int i = 0; i < ruleext->udfs_cnt; i++) {
+		unsigned int o = udfs_remap[i];
+
+		if (!priv->udfs_refcnt[o])
+			priv->udfs_ctrl[o] = ruleext->udfs_ctrl[i];
+		priv->udfs_refcnt[o]++;
+	}
 	priv->acl_masks[blkid] |= aclrule->mask;
 	return 0;
 

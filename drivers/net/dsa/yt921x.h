@@ -1027,6 +1027,8 @@ struct yt921x_priv {
 	DECLARE_BITMAP(meters_map, YT921X_METER_NUM);
 	DECLARE_BITMAP(flowstats_map, YT921X_FLOWSTAT_NUM);
 
+	u32 udfs_ctrl[YT921X_UDF_NUM];
+	unsigned short udfs_refcnt[YT921X_UDF_NUM];
 	u8 acl_masks[YT921X_ACL_BLK_NUM];
 	struct yt921x_acl_blk *acl_blks[YT921X_ACL_BLK_NUM];
 };
