@@ -1,0 +1,63 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/phy/realtek,rtl8197f-usbphy.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Realtek RTL819x USB 2.0 PHY
+
+maintainers:
+  - David Yang <mmyangfl@gmail.com>
+
+description: |
+  The RTL8197F (and other RTL819x SoCs) integrate two UTMI USB 2.0 PHYs.
+  Both PHYs are shared by the on-chip EHCI and OHCI host controllers; PHY 1
+  can alternatively be routed to the DWC OTG device controller.  Power and
+  reset of the PHYs is controlled through the system controller, while the
+  electrical parameters are written through an indirect access port made of
+  a data register in the USB analog block and an address strobe register
+  inside the EHCI MMIO space.
+
+properties:
+  compatible:
+    const: realtek,rtl8197f-usbphy
+
+  reg:
+    items:
+      - description: USB analog block registers (UTMI data / port control)
+      - description: UTMI address strobe register (EHCI MMIO offset 0xa4)
+
+  reg-names:
+    items:
+      - const: analog
+      - const: utmi-acc
+
+  syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the system controller node (realtek,rtl8197f-syscon),
+      providing the USB clock gate, host enable, PHY power/reset and SIE
+      routing registers.
+
+  "#phy-cells":
+    const: 1
+    description: The USB port (UTMI PHY) index, 0 or 1.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - syscon
+  - "#phy-cells"
+
+additionalProperties: false
+
+examples:
+  - |
+    usb-phy@140200 {
+        compatible = "realtek,rtl8197f-usbphy";
+        reg = <0x140200 0x18>, <0x210a4 0x4>;
+        reg-names = "analog", "utmi-acc";
+        syscon = <&syscon>;
+        #phy-cells = <1>;
+    };
