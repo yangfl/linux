@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/clock/realtek,rtl8197f-clock.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Realtek RTL8197F SoC clock controller
+
+maintainers:
+  - David Yang <mmyangfl@gmail.com>
+
+description: |
+  The RTL8197F system clock controller multiplexes and divides the CPU
+  clock according to the hardware strap register, and feeds the LX bus
+  and on-SoC peripherals such as the UART and SPI flash controllers.
+  The driver currently only probes the strap/register values at boot
+  time and exposes read-only clocks.
+
+properties:
+  compatible:
+    const: realtek,rtl8197f-clock
+
+  reg:
+    maxItems: 1
+
+  clocks:
+    maxItems: 1
+
+  clock-names:
+    items:
+      - const: xtal
+
+  '#clock-cells':
+    const: 1
+
+required:
+  - compatible
+  - reg
+  - clocks
+  - '#clock-cells'
+
+additionalProperties: false
+
+examples:
+  - |
+    clock-controller@18000000 {
+        compatible = "realtek,rtl8197f-clock";
+        reg = <0x18000000 0x20>;
+        clocks = <&xtal>;
+        #clock-cells = <1>;
+    };
