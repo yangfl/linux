@@ -202,6 +202,16 @@ config ECONET_EN751221_INTC
 	select GENERIC_IRQ_CHIP
 	select IRQ_DOMAIN
 
+config IRQ_REALTEK_RTL819X
+	bool
+	depends on MACH_REALTEK_RTL819X || COMPILE_TEST
+	select IRQ_DOMAIN
+	help
+	  Support for the secondary interrupt controller in the Realtek
+	  RTL819x MIPS router SoCs (RTL8197F and relatives), cascaded into
+	  the MIPS CPU interrupt controller.  This symbol has no prompt and
+	  is meant to be selected by MACH_REALTEK_RTL819X.
+
 config FARADAY_FTINTC010
 	bool
 	select IRQ_DOMAIN

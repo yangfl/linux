@@ -22993,6 +22993,12 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/net/pse-pd/realtek,pse-mcu-gen1.yaml
 F:	drivers/net/pse-pd/realtek-pse-mcu*
 
+REALTEK RTL819X INTERRUPT CONTROLLER DRIVER
+M:	David Yang <mmyangfl@gmail.com>
+S:	Maintained
+F:	Documentation/devicetree/bindings/interrupt-controller/realtek,rtl8197f-intc.yaml
+F:	drivers/irqchip/irq-realtek-rtl819x.c
+
 REALTEK RTL819X SOC SUPPORT
 M:	David Yang <mmyangfl@gmail.com>
 S:	Maintained
