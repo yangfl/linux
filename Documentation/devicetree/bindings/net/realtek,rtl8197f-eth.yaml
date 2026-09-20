@@ -1,0 +1,76 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/net/realtek,rtl8197f-eth.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Realtek RTL8197F Ethernet MAC / embedded switch CPU interface
+
+maintainers:
+  - David Yang <mmyangfl@gmail.com>
+
+description: |
+  The RTL8197F integrates a 5+1 port Ethernet switch whose CPU port is served
+  by a DMA engine (the "NIC" or "CPU interface" block).  The MAC has no
+  per-port PHY management of its own: the embedded switch is expected to be
+  set up by the bootloader (port enable, VLAN / port isolation, CPU port
+  mapping), and this node only programs the DMA descriptor rings used to
+  exchange packets with the switch over the CPU port.
+
+  Packets received from the CPU port carry no Ethernet switch tag by default
+  and are directed by the switch configuration; the destination port mask
+  used on transmit can be selected with realtek,tx-portmask.
+
+properties:
+  compatible:
+    const: realtek,rtl8197f-eth
+
+  reg:
+    maxItems: 1
+    description:
+      CPU interface (NIC DMA) register block, offset 0x10000 from the system
+      controller base (physical 0x18010000 on RTL8197F).
+
+  reg-names:
+    const: nic
+
+  interrupts:
+    maxItems: 1
+    description:
+      Switch/CPU-interface interrupt on the SoC interrupt controller
+      (intc input 15, routed to CPU interrupt input 4).
+
+  realtek,tx-portmask:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    maximum: 0x7f
+    description:
+      Destination port mask written to the Tx descriptor (TD_DP field,
+      bit 6 = CPU port, bits 5..0 = physical/ext. ports 5..0) for directly
+      transmitted packets when no hardware offload path is used.  If absent,
+      all switch ports (0x3f) are addressed, which relies on the bootloader
+      switch configuration to forward/flood appropriately.
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+
+allOf:
+  - $ref: ethernet-controller.yaml#
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    ethernet@18010000 {
+      compatible = "realtek,rtl8197f-eth";
+      reg = <0x18010000 0x100>;
+      reg-names = "nic";
+      interrupt-parent = <&intc>;
+      interrupts = <15 1>;
+
+      realtek,tx-portmask = <0x1>;
+      local-mac-address = [00 11 22 33 44 55];
+    };
+...
