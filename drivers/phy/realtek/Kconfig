@@ -3,7 +3,7 @@
 # Phy drivers for Realtek platforms
 #
 
-if ARCH_REALTEK || COMPILE_TEST
+if ARCH_REALTEK || MACH_REALTEK_RTL819X || COMPILE_TEST
 
 config PHY_RTK_RTD_USB2PHY
 	tristate "Realtek RTD USB2 PHY Transceiver Driver"
@@ -29,4 +29,18 @@ config PHY_RTK_RTD_USB3PHY
 	  DWC3 USB IP. This driver will do the PHY initialization
 	  of the parameters.
 
-endif # ARCH_REALTEK || COMPILE_TEST
+config PHY_REALTEK_RTL819X_USB
+	tristate "Realtek RTL819x USB 2.0 PHY driver"
+	depends on USB_SUPPORT && OF
+	select GENERIC_PHY
+	select MFD_SYSCON
+	default MACH_REALTEK_RTL819X
+	help
+	  Enable this to support the two UTMI USB 2.0 PHYs found in the
+	  Realtek RTL819x router SoCs (RTL8197F).  The PHYs are shared by
+	  the on-chip EHCI/OHCI host controllers; PHY 1 can alternatively
+	  be routed to the DWC OTG device controller.  The driver handles
+	  the system controller power/reset bits and the indirect UTMI
+	  register access used for electrical tuning.
+
+endif # ARCH_REALTEK || MACH_REALTEK_RTL819X || COMPILE_TEST
