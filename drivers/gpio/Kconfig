@@ -635,6 +635,21 @@ config GPIO_REALTEK_OTTO
 
 	  When built as a module, the module will be called realtek_otto_gpio.
 
+config GPIO_REALTEK_RTL819X
+	tristate "Realtek RTL819x (RTL8197F) GPIO support"
+	depends on OF
+	depends on MIPS || COMPILE_TEST
+	default MACH_REALTEK_RTL819X
+	select GPIO_GENERIC
+	select GPIOLIB_IRQCHIP
+	help
+	  The GPIO controller on the Realtek RTL8197F SoC provides two banks
+	  of 32 GPIOs, each with edge triggered interrupts cascading from the
+	  SoC interrupt controller.
+
+	  When built as a module, the module will be called
+	  gpio-realtek-rtl819x.
+
 config GPIO_REG
 	bool
 	help

@@ -22993,6 +22993,12 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/net/pse-pd/realtek,pse-mcu-gen1.yaml
 F:	drivers/net/pse-pd/realtek-pse-mcu*
 
+REALTEK RTL819X GPIO DRIVER
+M:	David Yang <mmyangfl@gmail.com>
+S:	Maintained
+F:	Documentation/devicetree/bindings/gpio/realtek,rtl8197f-gpio.yaml
+F:	drivers/gpio/gpio-realtek-rtl819x.c
+
 REALTEK RTL819X INTERRUPT CONTROLLER DRIVER
 M:	David Yang <mmyangfl@gmail.com>
 S:	Maintained
