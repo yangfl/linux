@@ -1,0 +1,59 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/serial/realtek,rtl8197f-uart.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Realtek RTL8197F UART
+
+maintainers:
+  - David Yang <mmyangfl@gmail.com>
+
+description: |
+  The RTL8197F integrates a DesignWare APB UART whose register file is
+  word-strided like a regular 8250 with reg-shift = 2, but the TX/RX
+  FIFO register is placed at offset 0x24 instead of 0x00, so it is not
+  covered by the generic snps,dw-apb-uart binding.
+
+allOf:
+  - $ref: serial.yaml#
+
+properties:
+  compatible:
+    const: realtek,rtl8197f-uart
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    maxItems: 1
+    description:
+      Optional bus clock; when absent the driver falls back to
+      clock-frequency.
+
+  clock-frequency: true
+
+  reg-shift:
+    const: 2
+
+required:
+  - compatible
+  - reg
+  - interrupts
+  - clock-frequency
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    serial@18147000 {
+        compatible = "realtek,rtl8197f-uart";
+        reg = <0x18147000 0x100>;
+        interrupts = <9 4>;
+        interrupt-parent = <&intc>;
+        clock-frequency = <100000000>;
+        reg-shift = <2>;
+    };
