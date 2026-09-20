@@ -713,6 +713,32 @@ config MACH_REALTEK_RTL
 	select PINCTRL
 	select USE_OF
 	select REALTEK_OTTO_TIMER
+config MACH_REALTEK_RTL819X
+	bool "Realtek RTL819x based machines"
+	select MIPS_GENERIC
+	select MACH_GENERIC_CORE
+	select DMA_NONCOHERENT
+	select IRQ_MIPS_CPU
+	select CSRC_R4K
+	select SYS_HAS_CPU_MIPS32_R2
+	select REALTEK_RTL819X_TIMER
+	select SYS_SUPPORTS_32BIT_KERNEL
+	select SYS_SUPPORTS_LITTLE_ENDIAN
+	select SYS_SUPPORTS_MIPS16
+	select BOOT_RAW
+	select USE_OF
+	select COMMON_CLK
+	select IRQ_REALTEK_RTL819X
+	select HAVE_PCI
+	select BUILTIN_DTB if MIPS_NO_APPENDED_DTB
+	select USB_EHCI_BIG_ENDIAN_DESC if USB_SUPPORT
+	select USB_OHCI_BIG_ENDIAN_DESC if USB_SUPPORT
+	help
+	  Realtek RTL819x wireless router SoCs, currently the RTL8197F
+	  (little-endian MIPS 24KEc).  Like the RTL83xx/93xx (Otto) line,
+	  these use the generic MIPS platform with a device tree; the SoC
+	  peripherals are brought up by their own drivers.
+
 
 config SGI_IP22
 	bool "SGI IP22 (Indy/Indigo2)"
