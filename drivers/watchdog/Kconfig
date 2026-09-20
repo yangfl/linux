@@ -1124,6 +1124,20 @@ config REALTEK_OTTO_WDT
 
 	  When built as a module this will be called realtek_otto_wdt.
 
+config REALTEK_RTL819X_WATCHDOG
+	tristate "Realtek RTL819x MIPS watchdog support"
+	depends on MACH_REALTEK_RTL819X || COMPILE_TEST
+	depends on COMMON_CLK
+	select WATCHDOG_CORE
+	default MACH_REALTEK_RTL819X
+	help
+	  Say Y here to include support for the watchdog timer on Realtek
+	  RTL8196E, RTL8197D and RTL8197F SoCs. This watchdog has no
+	  interrupt and resets the system on timeout. It is also used to
+	  restart the system.
+
+	  When built as a module this will be called realtek_rtl819x_wdt.
+
 config SPRD_WATCHDOG
 	tristate "Spreadtrum watchdog support"
 	depends on ARCH_SPRD || COMPILE_TEST

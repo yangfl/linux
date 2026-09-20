@@ -185,6 +185,7 @@ obj-$(CONFIG_MT7621_WDT) += mt7621_wdt.o
 obj-$(CONFIG_PIC32_WDT) += pic32-wdt.o
 obj-$(CONFIG_PIC32_DMT) += pic32-dmt.o
 obj-$(CONFIG_REALTEK_OTTO_WDT) += realtek_otto_wdt.o
+obj-$(CONFIG_REALTEK_RTL819X_WATCHDOG) += realtek_rtl819x_wdt.o
 
 # PARISC Architecture
 

@@ -23012,6 +23012,12 @@ F:	Documentation/devicetree/bindings/mips/realtek-rtl819x.yaml
 F:	arch/mips/boot/dts/realtek/rtl8197f*
 F:	arch/mips/generic/board-realtek-rtl819x.c
 
+REALTEK RTL819X WATCHDOG DRIVER
+M:	David Yang <mmyangfl@gmail.com>
+S:	Maintained
+F:	Documentation/devicetree/bindings/watchdog/realtek,rtl8197f-wdt.yaml
+F:	drivers/watchdog/realtek_rtl819x_wdt.c
+
 REALTEK RTL83xx SMI DSA ROUTER CHIPS
 M:	Linus Walleij <linusw@kernel.org>
 M:	Luiz Angelo Daros de Luca <luizluca@gmail.com>
