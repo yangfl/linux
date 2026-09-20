@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR BSD-2-Clause
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include "rtl8197f.dtsi"
+
+/ {
+	compatible = "netcore,mg1200ac", "realtek,rtl8197f-soc";
+	model = "Netcore MG1200AC";
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x8000000>;
+	};
+
+	chosen {
+		stdout-path = "serial0:38400n8";
+		bootargs = "earlycon=rtl8197f,mmio32,0x18147000 console=ttyS0,38400";
+	};
+
+	/*
+	 * External RTL8367RB switch, bit-banged over the SMI (GPIO MDC/MDIO)
+	 * lines the vendor BSP uses for the same purpose: MDC on PC2, MDIO on
+	 * PC3, hardware reset on PH2.  The CPU interface is extended port 2
+	 * (port 6), RGMII to the internal GMAC.  The four PHY ports map the
+	 * board LAN jacks; the WAN jack sits on port 0.
+	 */
+	switch {
+		compatible = "realtek,rtl8365mb";
+		mdc-gpios = <&gpio0 18 GPIO_ACTIVE_HIGH>;
+		mdio-gpios = <&gpio0 19 GPIO_ACTIVE_HIGH>;
+		reset-gpios = <&gpio1 26 GPIO_ACTIVE_LOW>;
+		realtek,disable-leds;
+
+		mdio {
+			compatible = "realtek,smi-mdio";
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			internal_phy0: ethernet-phy@0 {
+				reg = <0>;
+			};
+
+			internal_phy1: ethernet-phy@1 {
+				reg = <1>;
+			};
+
+			internal_phy2: ethernet-phy@2 {
+				reg = <2>;
+			};
+
+			internal_phy3: ethernet-phy@3 {
+				reg = <3>;
+			};
+
+			internal_phy4: ethernet-phy@4 {
+				reg = <4>;
+			};
+		};
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			port@0 {
+				reg = <0>;
+				label = "wan";
+				phy-mode = "internal";
+				phy-handle = <&internal_phy0>;
+			};
+
+			port@1 {
+				reg = <1>;
+				label = "lan1";
+				phy-mode = "internal";
+				phy-handle = <&internal_phy1>;
+			};
+
+			port@2 {
+				reg = <2>;
+				label = "lan2";
+				phy-mode = "internal";
+				phy-handle = <&internal_phy2>;
+			};
+
+			port@3 {
+				reg = <3>;
+				label = "lan3";
+				phy-mode = "internal";
+				phy-handle = <&internal_phy3>;
+			};
+
+			port@4 {
+				reg = <4>;
+				label = "lan4";
+				phy-mode = "internal";
+				phy-handle = <&internal_phy4>;
+			};
+
+			port@6 {
+				reg = <6>;
+				ethernet = <&eth0>;
+				/*
+				 * Plain "rgmii": both ends (RTL8367RB
+				 * P6 RGMII and the RTL8197F GMAC) use
+				 * their power-on TX/RX delay defaults;
+				 * no extra PCB skew compensation needed
+				 * on this board.
+				 */
+				phy-mode = "rgmii";
+
+				fixed-link {
+					speed = <1000>;
+					full-duplex;
+				};
+			};
+		};
+	};
+};
+
+&uart0 {
+	status = "okay";
+};
+
+&gpio0 {
+	status = "okay";
+};
+
+&gpio1 {
+	status = "okay";
+};
+
+&timer0 {
+	status = "okay";
+};
+
+&wdt {
+	timeout-sec = <30>;
+	status = "okay";
+};
+
+&usb_ohci {
+	status = "okay";
+};
+
+&usb_ehci {
+	status = "okay";
+};
+
+&eth0 {
+	status = "okay";
+};
+
+&pcie {
+	status = "okay";
+};
+
+&spi0 {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <12500000>;
+
+		/*
+		 * Vendor layout, as printed by the stock firmware.  The two unaligned "Kernel" / "RootFS"
+		 * sub-partitions are merged into "firmware"; the trailing
+		 * "ALL" (full-flash) entry is dropped.
+		 */
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "boot";
+				reg = <0x0 0x20000>;
+				read-only;
+			};
+
+			partition@20000 {
+				label = "config";
+				reg = <0x20000 0x10000>;
+				read-only;
+			};
+
+			/* Winbond w25q128 (16 MiB). */
+			partition@30000 {
+				label = "firmware";
+				reg = <0x30000 0xad0000>;
+			};
+
+			partition@b00000 {
+				label = "plugin";
+				reg = <0xb00000 0x4d0000>;
+			};
+
+			partition@fd0000 {
+				label = "reserve";
+				reg = <0xfd0000 0x10000>;
+				read-only;
+			};
+
+			partition@fe0000 {
+				label = "parameter2";
+				reg = <0xfe0000 0x10000>;
+				read-only;
+			};
+
+			partition@ff0000 {
+				label = "parameter1";
+				reg = <0xff0000 0x10000>;
+				read-only;
+			};
+		};
+	};
+};
