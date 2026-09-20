@@ -142,6 +142,16 @@ config RDA_TIMER
 	help
 	  Enables the support for the RDA Micro timer driver.
 
+config REALTEK_RTL819X_TIMER
+	bool "Realtek RTL819x timer driver" if COMPILE_TEST
+	default MACH_REALTEK_RTL819X
+	select TIMER_OF
+	help
+	  This driver adds support for the timer block found in the Realtek
+	  RTL819x MIPS SoC series (RTL8197F and relatives), which serves as
+	  the system clock event device: the core does not route the CP0
+	  Compare interrupt to an IP line.
+
 config REALTEK_OTTO_TIMER
 	bool "Clocksource/timer for the Realtek Otto platform" if COMPILE_TEST
 	select TIMER_OF
