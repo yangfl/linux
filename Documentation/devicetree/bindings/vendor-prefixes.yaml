@@ -1172,6 +1172,8 @@ patternProperties:
     description: Neofidelity Inc.
   "^neonode,.*":
     description: Neonode Inc.
+  "^netcore,.*":
+    description: Netcore Technology Co., Ltd.
   "^netcube,.*":
     description: NetCube Systems Austria
   "^netgear,.*":
