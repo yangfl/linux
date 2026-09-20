@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/pci/realtek,rtl8197f-pcie.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Realtek RTL819x PCIe controller
+
+maintainers:
+  - David Yang <mmyangfl@gmail.com>
+
+description: |
+  The RTL819x family of wireless router SoCs (RTL8196E, RTL8197D,
+  RTL8197F, ...) contains a single PCIe 1.1 root port, normally used to
+  attach the on-board wireless card.
+
+  The root port configuration space is memory mapped directly;
+  configuration accesses to downstream devices are routed through an
+  indexed window selected by the IPCFG register.  The PCIe PHY is
+  programmed over a private MDIO bus before the link comes up; the
+  clock, reset and PERST# bits live in the shared system controller.
+
+allOf:
+  - $ref: /schemas/pci/pci-host-bridge.yaml#
+
+properties:
+  compatible:
+    const: realtek,rtl8197f-pcie
+
+  reg:
+    maxItems: 3
+
+  reg-names:
+    items:
+      - const: rc_cfg
+      - const: ep_cfg
+      - const: rc_ext
+
+  ranges: true
+
+  syscon:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      Phandle to the system controller holding the PCIe clock enables,
+      resets, PERST# bit and PHY MDIO reset.
+
+  interrupts:
+    maxItems: 1
+    description:
+      Shared legacy INTA#/INTB#/INTC#/INTD# interrupt of the root port.
+      This is input 21 of the SoC interrupt controller (routed to CPU
+      IP5 inside the controller) and must be described through that
+      controller's domain.  The CPU interrupt lines are chained
+      handlers owned by the interrupt controller and cannot be
+      requested directly.
+
+  "#interrupt-cells":
+    const: 1
+
+  interrupt-map-mask:
+    items:
+      - const: 0
+      - const: 0
+      - const: 0
+      - const: 7
+
+  interrupt-map:
+    maxItems: 4
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - ranges
+  - syscon
+  - interrupts
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    pcie@18b00000 {
+        compatible = "realtek,rtl8197f-pcie";
+        reg = <0x18b00000 0x1000>, <0x18b10000 0x1000>, <0x18b01000 0x100>;
+        reg-names = "rc_cfg", "ep_cfg", "rc_ext";
+        ranges = <0x01000000 0 0 0x18c00000 0 0x200000>,
+                 <0x02000000 0 0x19000000 0x19000000 0 0xc00000>;
+        syscon = <&syscon>;
+
+        interrupt-parent = <&intc>;
+        interrupts = <21 2>;
+        interrupt-map-mask = <0 0 0 7>;
+        interrupt-map = <0 0 0 1 &intc 21 4>,
+                        <0 0 0 2 &intc 21 4>,
+                        <0 0 0 3 &intc 21 4>,
+                        <0 0 0 4 &intc 21 4>;
+
+        #address-cells = <3>;
+        #size-cells = <2>;
+        #interrupt-cells = <1>;
+        device_type = "pci";
+    };
+...
