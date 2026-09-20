@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config COMMON_CLK_REALTEK_RTL819X
+	tristate "Clock driver for Realtek RTL819x SoCs"
+	depends on MACH_REALTEK_RTL819X || COMPILE_TEST
+	default MACH_REALTEK_RTL819X
+	help
+	  This driver provides basic read-only clock support for the
+	  Realtek RTL8197F family of router SoCs.  It probes the CPU
+	  frequency selection and CPU divider from the hardware strap
+	  register and exports the CPU, LX (bus), UART and SPI clocks
+	  to clock consumers through the common clock framework.
