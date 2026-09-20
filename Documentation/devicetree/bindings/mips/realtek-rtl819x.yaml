@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/mips/realtek-rtl819x.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Realtek RTL819x SoC series
+
+maintainers:
+  - David Yang <mmyangfl@gmail.com>
+
+description: |
+  The RTL819x family are Realtek's wireless router SoCs, based on a
+  little-endian MIPS 24KEc class CPU, distinct from the RTL83xx/93xx
+  (Otto) switch SoC series.
+
+properties:
+  $nodename:
+    const: "/"
+  compatible:
+    oneOf:
+      # RTL8197F-based boards
+      - items:
+          - enum:
+              - netcore,mg1200ac
+          - const: realtek,rtl8197f-soc
+
+additionalProperties: true
