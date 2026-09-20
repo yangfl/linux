@@ -23000,6 +23000,12 @@ F:	Documentation/devicetree/bindings/clock/realtek,rtl8197f-clock.yaml
 F:	drivers/clk/realtek/
 F:	include/dt-bindings/clock/realtek-rtl819x-clks.h
 
+REALTEK RTL819X ETHERNET DRIVER
+M:	David Yang <mmyangfl@gmail.com>
+S:	Maintained
+F:	Documentation/devicetree/bindings/net/realtek,rtl8197f-eth.yaml
+F:	drivers/net/ethernet/realtek/rtl819x_eth.c
+
 REALTEK RTL819X GPIO DRIVER
 M:	David Yang <mmyangfl@gmail.com>
 S:	Maintained
