@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/spi/realtek,rtl8197f-spi.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Realtek RTL8197F SPI flash controller
+
+maintainers:
+  - David Yang <mmyangfl@gmail.com>
+
+description: |
+  The RTL8197F (and other RTL819x SoCs) contain a SPI flash controller
+  derived from the DesignWare SSI, located at 0x18143000.  It is a
+  half-duplex, single-lane controller intended to drive a SPI NOR flash
+  chip, and works together with the SPI NOR framework (jedec,spi-nor).
+
+  This controller is unrelated to the simpler SPI flash controller found in
+  the Realtek Otto SoCs (RTL8380/8382/8391/8392/8393), which has a
+  completely different register layout and uses the "realtek,rtl8380-spi"
+  family of compatibles.
+
+allOf:
+  - $ref: spi-controller.yaml#
+
+properties:
+  compatible:
+    const: realtek,rtl8197f-spi
+
+  reg:
+    maxItems: 1
+
+  clocks:
+    maxItems: 1
+    description:
+      Optional bus clock; when absent the driver falls back to
+      clock-frequency.
+
+  clock-frequency: true
+
+  num-cs:
+    description: Number of chip selects, up to 16.
+    $ref: /schemas/types.yaml#/definitions/uint32
+    minimum: 1
+    maximum: 16
+    default: 1
+
+required:
+  - compatible
+  - reg
+  - "#address-cells"
+  - "#size-cells"
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    spi0: spi@18143000 {
+        compatible = "realtek,rtl8197f-spi";
+        reg = <0x18143000 0x1000>;
+        clock-frequency = <200000000>;
+        num-cs = <1>;
+        #address-cells = <1>;
+        #size-cells = <0>;
+
+        flash@0 {
+            compatible = "jedec,spi-nor";
+            reg = <0>;
+            spi-max-frequency = <50000000>;
+
+            partitions {
+                compatible = "fixed-partitions";
+                #address-cells = <1>;
+                #size-cells = <1>;
+
+                partition@0 {
+                    label = "boot";
+                    reg = <0x0 0x40000>;
+                    read-only;
+                };
+
+                partition@40000 {
+                    label = "firmware";
+                    reg = <0x40000 0x1fc0000>;
+                };
+            };
+        };
+    };
+...
