@@ -23012,6 +23012,12 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/interrupt-controller/realtek,rtl8197f-intc.yaml
 F:	drivers/irqchip/irq-realtek-rtl819x.c
 
+REALTEK RTL819X PCI CONTROLLER DRIVER
+M:	David Yang <mmyangfl@gmail.com>
+S:	Maintained
+F:	Documentation/devicetree/bindings/pci/realtek,rtl8197f-pcie.yaml
+F:	drivers/pci/controller/pci-realtek-rtl819x.c
+
 REALTEK RTL819X SOC SUPPORT
 M:	David Yang <mmyangfl@gmail.com>
 S:	Maintained

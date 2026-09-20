@@ -240,6 +240,19 @@ config PCIE_MT7621
 	help
 	  This selects a driver for the MediaTek MT7621 PCIe Controller.
 
+config PCI_REALTEK_RTL819X
+	# MIPS legacy PCI framework (register_pci_controller) is not exported
+	bool "Realtek RTL819x PCIe controller"
+	depends on MACH_REALTEK_RTL819X
+	depends on OF && PCI_DRIVERS_LEGACY
+	select MFD_SYSCON
+	default MACH_REALTEK_RTL819X
+	help
+	  Say Y here if you want the PCIe controller of the Realtek RTL819x
+	  router SoCs (RTL8196E, RTL8197D, RTL8197F, ...) to be supported.
+	  It is typically used to attach an on-board or mini-PCIe wireless
+	  card.  If unsure, say Y.
+
 config PCI_HYPERV_INTERFACE
 	tristate "Microsoft Hyper-V PCI Interface"
 	depends on ((X86 && X86_64) || ARM64) && HYPERV && PCI_MSI
