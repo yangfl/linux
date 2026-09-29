@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR BSD-2-Clause
 
+#include <dt-bindings/clock/realtek-rtl819x-clks.h>
+
 / {
 	#address-cells = <1>;
 	#size-cells = <1>;
@@ -202,6 +204,33 @@
 			clock-frequency = <200000000>;
 
 			status = "disabled";
+		};
+	};
+
+	/*
+	 * Embedded 5+1 port switch.  Outside the internal bus window.
+	 * Currently only a quirk driver claims this (register window +
+	 * bring-up for the CPU-port NIC); no switch management (L2/VLAN).
+	 */
+	switch: switch@1b800000 {
+		compatible = "realtek,rtl8197f-switch";
+		reg = <0x1b800000 0x500000>;
+
+		status = "disabled";
+
+		ports {
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			/*
+			 * Logical port 8 is the CPU interface: it is not a
+			 * netdev of its own, the frames it forwards reach the
+			 * host through the MAC named below.
+			 */
+			port@8 {
+				reg = <8>;
+				ethernet = <&eth0>;
+			};
 		};
 	};
 

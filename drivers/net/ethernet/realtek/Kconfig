@@ -126,8 +126,6 @@ config RTASE
 	  To compile this driver as a module, choose M here: the module
 	  will be called rtase. This is recommended.
 
-endif # NET_VENDOR_REALTEK
-
 comment "Realtek SoC Ethernet"
 	depends on MIPS || COMPILE_TEST
 
@@ -143,10 +141,31 @@ config RTL819X_ETH
 	  MAC / embedded switch CPU interface found in the Realtek RTL819xF
 	  family of MIPS-based router SoCs, currently the RTL8197F.
 
-	  The driver only operates the CPU-port DMA descriptor rings and
-	  expects the embedded switch itself (port enable, VLAN, CPU port
-	  mapping) to have been configured by the bootloader.  Hardware
-	  L2/L3/L4 offloading is not implemented.
+	  The driver only operates the CPU-port DMA descriptor rings; the
+	  embedded switch core itself (reset, port enable, VLAN, CPU port
+	  mapping) is brought up by the switch quirk driver bound to its own
+	  device tree node.  Hardware L2/L3/L4 offloading is not implemented.
 
 	  To compile this driver as a module, choose M here: the module
 	  will be called rtl819x_eth.
+
+config RTL819X_SWITCH
+	tristate "Realtek RTL8197F embedded switch quirk driver"
+	depends on MIPS || COMPILE_TEST
+	depends on OF
+	default MACH_REALTEK_RTL819X
+	help
+	  Minimal bring-up for the embedded switch of the Realtek RTL8197F:
+	  it claims the switch register window, performs the SMI pinmux
+	  quirk for the external DSA switch and arms the switch-side DMA
+	  trigger that the CPU-port Ethernet MAC needs.
+
+	  This is not a switch management driver: no L2 tables, VLANs or
+	  offloads are programmed; the switch is expected to be configured
+	  by the bootloader.  It is meant to be replaced by a proper DSA
+	  driver.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called rtl819x_switch.
+
+endif # NET_VENDOR_REALTEK

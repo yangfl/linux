@@ -151,6 +151,10 @@
 	status = "okay";
 };
 
+&switch {
+	status = "okay";
+};
+
 &pcie {
 	status = "okay";
 };

@@ -19,9 +19,6 @@
  *    "direct Tx" mode (no HW lookup, no bridging), checksums are done in
  *    software.
  *
- * TODO: DSA driver on top of the switch block (physical 0x1b800000) so the
- * individual switch ports can be exposed as user ports.
- *
  * Register semantics are taken from the vendor SDK:
  *   rtk_openwrtSDK_v2.5 drivers/net/rtl819x/
  *     rtl819x_swNic.c, rtl819x_swNic.h
@@ -780,25 +777,6 @@ static int rtl819x_open(struct net_device *ndev)
 	rtl_wr(priv, RTL_DMA_CR0,
 	       (rtl_rr(priv, RTL_DMA_CR0) & 0xffff0000) | 0xa0a0);
 
-	/*
-	 * Vendor rtl865x_start() finishes with two more steps:
-	 * - a dummy read of the ACL table entry 0 (0xBB0C0000), an official
-	 *   workaround for "driver can't receive packet when LAN un-plug";
-	 * - the switch-side DMA trigger: SIRR TRXRDY (bit 0) at 0xBB804204
-	 *   starts the RX/TX descriptor processing.  Without it the NIC DMA
-	 *   never delivers frames.
-	 */
-	{
-		void __iomem *swwin = ioremap(0x1B800000, 0x500000);
-
-		if (!IS_ERR_OR_NULL(swwin)) {
-			readl(swwin + 0xc0000);
-			writel(readl(swwin + 0x4204) | BIT(0),
-			       swwin + 0x4204);
-			iounmap(swwin);
-		}
-	}
-
 	rtl_wr(priv, RTL_CPUIIMR, RTL_IRQ_ALL);
 
 	netdev_info(ndev, "opened: irq %d, CPUICR=%08x CPUICR1=%08x IMR=%08x\n",
@@ -807,13 +785,6 @@ static int rtl819x_open(struct net_device *ndev)
 
 	return 0;
 
-err_stop:
-	/* the engine and IRQ are already live: tear everything back down */
-	netif_stop_queue(ndev);
-	napi_disable(&priv->napi);
-	rtl_wr(priv, RTL_CPUIIMR, 0);
-	rtl_wr(priv, RTL_CPUICR, 0);
-	free_irq(priv->irq, ndev);
 err_free:
 	netdev_err(ndev, "open failed with %d\n", ret);
 	rtl819x_free_rings(priv);
@@ -930,17 +901,6 @@ static void rtl819x_eth_tx_timeout(struct net_device *ndev, unsigned int txqueue
 	 */
 	rtl_wr(priv, RTL_DMA_CR0,
 	       (rtl_rr(priv, RTL_DMA_CR0) & 0xffff0000) | 0xa0a0);
-
-	{
-		void __iomem *swwin = ioremap(0x1B800000, 0x500000);
-
-		if (!IS_ERR_OR_NULL(swwin)) {
-			readl(swwin + 0xc0000);
-			writel(readl(swwin + 0x4204) | BIT(0),
-			       swwin + 0x4204);
-			iounmap(swwin);
-		}
-	}
 
 	netif_wake_queue(ndev);
 	rtl_wr(priv, RTL_CPUIIMR, RTL_IRQ_ALL);

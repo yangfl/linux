@@ -22993,61 +22993,36 @@ S:	Maintained
 F:	Documentation/devicetree/bindings/net/pse-pd/realtek,pse-mcu-gen1.yaml
 F:	drivers/net/pse-pd/realtek-pse-mcu*
 
-REALTEK RTL819X CLOCK DRIVER
+REALTEK RTL819X (MIPS) SOC SUPPORT
 M:	David Yang <mmyangfl@gmail.com>
+L:	linux-mips@vger.kernel.org
 S:	Maintained
 F:	Documentation/devicetree/bindings/clock/realtek,rtl8197f-clock.yaml
-F:	drivers/clk/realtek/
-F:	include/dt-bindings/clock/realtek-rtl819x-clks.h
-
-REALTEK RTL819X ETHERNET DRIVER
-M:	David Yang <mmyangfl@gmail.com>
-S:	Maintained
-F:	Documentation/devicetree/bindings/net/realtek,rtl8197f-eth.yaml
-F:	drivers/net/ethernet/realtek/rtl819x_eth.c
-
-REALTEK RTL819X GPIO DRIVER
-M:	David Yang <mmyangfl@gmail.com>
-S:	Maintained
 F:	Documentation/devicetree/bindings/gpio/realtek,rtl8197f-gpio.yaml
-F:	drivers/gpio/gpio-realtek-rtl819x.c
-
-REALTEK RTL819X INTERRUPT CONTROLLER DRIVER
-M:	David Yang <mmyangfl@gmail.com>
-S:	Maintained
 F:	Documentation/devicetree/bindings/interrupt-controller/realtek,rtl8197f-intc.yaml
-F:	drivers/irqchip/irq-realtek-rtl819x.c
-
-REALTEK RTL819X PCI CONTROLLER DRIVER
-M:	David Yang <mmyangfl@gmail.com>
-S:	Maintained
-F:	Documentation/devicetree/bindings/pci/realtek,rtl8197f-pcie.yaml
-F:	drivers/pci/controller/pci-realtek-rtl819x.c
-
-REALTEK RTL819X USB2 PHY DRIVER
-M:	David Yang <mmyangfl@gmail.com>
-S:	Maintained
-F:	Documentation/devicetree/bindings/phy/realtek,rtl8197f-usbphy.yaml
-F:	drivers/phy/realtek/phy-rtl819x-usb.c
-
-REALTEK RTL819X SOC SUPPORT
-M:	David Yang <mmyangfl@gmail.com>
-S:	Maintained
 F:	Documentation/devicetree/bindings/mips/realtek-rtl819x.yaml
-F:	arch/mips/boot/dts/realtek/rtl8197f*
-F:	arch/mips/generic/board-realtek-rtl819x.c
-
-REALTEK RTL819X TIMER DRIVER
-M:	David Yang <mmyangfl@gmail.com>
-S:	Maintained
+F:	Documentation/devicetree/bindings/net/realtek,rtl8197f-eth.yaml
+F:	Documentation/devicetree/bindings/pci/realtek,rtl8197f-pcie.yaml
+F:	Documentation/devicetree/bindings/phy/realtek,rtl8197f-usbphy.yaml
+F:	Documentation/devicetree/bindings/serial/realtek,rtl8197f-uart.yaml
+F:	Documentation/devicetree/bindings/soc/realtek/realtek,rtl8197f-switch.yaml
+F:	Documentation/devicetree/bindings/soc/realtek/realtek,rtl8197f-syscon.yaml
+F:	Documentation/devicetree/bindings/spi/realtek,rtl8197f-spi.yaml
 F:	Documentation/devicetree/bindings/timer/realtek,rtl8197f-timer.yaml
-F:	drivers/clocksource/timer-realtek-rtl819x.c
-
-REALTEK RTL819X WATCHDOG DRIVER
-M:	David Yang <mmyangfl@gmail.com>
-S:	Maintained
 F:	Documentation/devicetree/bindings/watchdog/realtek,rtl8197f-wdt.yaml
+F:	arch/mips/boot/dts/realtek/rtl8197f*
+F:	arch/mips/configs/rtl8197f_defconfig
+F:	arch/mips/generic/board-realtek-rtl819x.c
+F:	drivers/clk/realtek/clk-rtl819x.c
+F:	drivers/clocksource/timer-realtek-rtl819x.c
+F:	drivers/gpio/gpio-realtek-rtl819x.c
+F:	drivers/irqchip/irq-realtek-rtl819x.c
+F:	drivers/net/ethernet/realtek/rtl819x_eth.c
+F:	drivers/net/ethernet/realtek/rtl819x_switch.c
+F:	drivers/pci/controller/pci-realtek-rtl819x.c
+F:	drivers/phy/realtek/phy-rtl819x-usb.c
 F:	drivers/watchdog/realtek_rtl819x_wdt.c
+F:	include/dt-bindings/clock/realtek-rtl819x-clks.h
 
 REALTEK RTL83xx SMI DSA ROUTER CHIPS
 M:	Linus Walleij <linusw@kernel.org>

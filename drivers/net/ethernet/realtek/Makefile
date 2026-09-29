@@ -11,3 +11,4 @@ obj-$(CONFIG_R8169) += r8169.o
 obj-$(CONFIG_RTASE) += rtase/
 
 obj-$(CONFIG_RTL819X_ETH) += rtl819x_eth.o
+obj-$(CONFIG_RTL819X_SWITCH) += rtl819x_switch.o
