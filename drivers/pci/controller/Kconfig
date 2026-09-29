@@ -241,10 +241,9 @@ config PCIE_MT7621
 	  This selects a driver for the MediaTek MT7621 PCIe Controller.
 
 config PCI_REALTEK_RTL819X
-	# MIPS legacy PCI framework (register_pci_controller) is not exported
-	bool "Realtek RTL819x PCIe controller"
-	depends on MACH_REALTEK_RTL819X
-	depends on OF && PCI_DRIVERS_LEGACY
+	tristate "Realtek RTL819x PCIe controller"
+	depends on MACH_REALTEK_RTL819X || COMPILE_TEST
+	depends on OF
 	select MFD_SYSCON
 	default MACH_REALTEK_RTL819X
 	help

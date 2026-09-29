@@ -254,21 +254,23 @@
 		reg-names = "rc_cfg", "ep_cfg", "rc_ext";
 
 		/*
-		 * The IO window decodes only 16 bits of bus address, so the
-		 * bus side starts at 0; IO BARs must not be assigned to
-		 * devices (see the controller binding).
+		 * MEM only: the controller decodes a 16-bit IO bus window,
+		 * but the generic MIPS platform cannot map it (no IO space
+		 * remap hook), and downstream devices are served through
+		 * memory BARs anyway (see the controller binding).
 		 */
-		ranges = <0x01000000 0 0  0x18c00000  0 0x200000>,
-			 <0x02000000 0 0x19000000  0x19000000  0 0xc00000>;
+		ranges = <0x02000000 0 0x19000000  0x19000000  0 0xc00000>;
+		bus-range = <0x00 0xff>;
 
 		syscon = <&syscon>;
 
 		/*
 		 * The root port interrupt is ICTL input 21 (routed to CPU
-		 * IP5 inside the controller); endpoint INTx are swizzled
-		 * onto the same input.  It must go through the ICTL
-		 * domain: the IP lines are chained handlers there and
-		 * cannot be requested directly.
+		 * IP5 inside the controller); the interrupt-map below maps
+		 * all four INTx pins of downstream devices onto that same
+		 * input.  It must go through the ICTL domain: the IP lines
+		 * are chained handlers there and cannot be requested
+		 * directly.
 		 */
 		interrupt-parent = <&intc>;
 		interrupts = <21 2>;

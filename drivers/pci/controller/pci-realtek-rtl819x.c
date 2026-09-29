@@ -10,6 +10,10 @@
  * bus before the link comes up; the reset bits live in the shared
  * system controller.
  *
+ * Root port and endpoint interrupts are described by the interrupt-map
+ * of the host bridge device node; the driver itself creates no
+ * interrupt domain.
+ *
  * Copyright (C) 2017 Weijie Gao <hackpascal@gmail.com>
  * Copyright (C) 2019 Gaspare Bruno <gaspare@anlix.io>
  * Copyright (C) 2026 David Yang <mmyangfl@gmail.com>
@@ -26,10 +30,13 @@
 #include <linux/platform_device.h>
 #include <linux/pci.h>
 #include <linux/regmap.h>
+#include <linux/resource_ext.h>
+
+#include "../pci.h"
 
 /* Root port configuration space (bus 0, device 0) */
 #define RTL819X_PCIE_RC_CFG_SIZE		0x1000
-#define RTL819X_PCIE_CFG_DEVCTL		0x78
+#define RTL819X_PCIE_CFG_DEVCTL			0x78
 #define RTL819X_PCIE_CFG_LINKDBG		0x728
 #define RTL819X_PCIE_LINKDBG_LTSSM		GENMASK(4, 0)
 #define RTL819X_PCIE_LTSSM_L0			0x11
@@ -91,15 +98,11 @@ static const struct rtl819x_pcie_data rtl8197f_pcie_data = {
 /**
  * struct rtl819x_pcie - RTL819x PCIe host controller
  * @dev: platform device
- * @rc_cfg: root port configuration space
  * @data: per-SoC register offsets / bits (per-compatible data)
+ * @rc_cfg: root port configuration space
  * @ep_cfg: downstream device configuration window
  * @rc_ext: root complex extended registers (MDIO, PWRCR, IPCFG)
  * @sysc: system controller with clock / reset / PERST bits
- * @hose: legacy MIPS PCI controller bookkeeping
- * @io_res: PCI I/O window resource
- * @mem_res: PCI memory window resource
- * @link_up: whether the link reached L0
  */
 struct rtl819x_pcie {
 	struct device *dev;
@@ -108,24 +111,14 @@ struct rtl819x_pcie {
 	void __iomem *ep_cfg;
 	void __iomem *rc_ext;
 	struct regmap *sysc;
-	struct pci_controller hose;
-	struct resource io_res;
-	struct resource mem_res;
-	bool link_up;
 };
-
-static inline struct rtl819x_pcie *bus_to_rtl819x(struct pci_bus *bus)
-{
-	struct pci_controller *hose = bus->sysdata;
-
-	return container_of(hose, struct rtl819x_pcie, hose);
-}
 
 static bool rtl819x_pcie_link_ok(struct rtl819x_pcie *pcie);
 
-static void __iomem *rtl819x_map_bus(struct rtl819x_pcie *pcie,
-				     struct pci_bus *bus, unsigned int devfn)
+static void __iomem *rtl819x_pcie_map_bus(struct pci_bus *bus,
+					  unsigned int devfn, int where)
 {
+	struct rtl819x_pcie *pcie = bus->sysdata;
 	u32 val;
 
 	if (!rtl819x_pcie_link_ok(pcie))
@@ -136,7 +129,7 @@ static void __iomem *rtl819x_map_bus(struct rtl819x_pcie *pcie,
 		if (PCI_SLOT(devfn) != 0)
 			return NULL;
 
-		return pcie->rc_cfg;
+		return pcie->rc_cfg + where;
 	}
 
 	/*
@@ -150,78 +143,13 @@ static void __iomem *rtl819x_map_bus(struct rtl819x_pcie *pcie,
 	      FIELD_PREP(RTL819X_PCIE_IPCFG_DEVFN, devfn);
 	writel_relaxed(val, pcie->rc_ext + RTL819X_PCIE_IPCFG);
 
-	return pcie->ep_cfg;
+	return pcie->ep_cfg + where;
 }
 
-static int rtl819x_pci_read(struct pci_bus *bus, unsigned int devfn,
-			    int where, int size, u32 *val)
-{
-	struct rtl819x_pcie *pcie = bus_to_rtl819x(bus);
-	void __iomem *addr = rtl819x_map_bus(pcie, bus, devfn);
-	u32 data;
-
-	if (!addr)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	data = readl_relaxed(addr + (where & ~3));
-
-	switch (size) {
-	case 1:
-		*val = (data >> ((where & 3) * 8)) & 0xff;
-		break;
-	case 2:
-		*val = (data >> ((where & 3) * 8)) & 0xffff;
-		break;
-	case 4:
-		*val = data;
-		break;
-	default:
-		return PCIBIOS_BAD_REGISTER_NUMBER;
-	}
-
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int rtl819x_pci_write(struct pci_bus *bus, unsigned int devfn,
-			     int where, int size, u32 val)
-{
-	struct rtl819x_pcie *pcie = bus_to_rtl819x(bus);
-	void __iomem *addr = rtl819x_map_bus(pcie, bus, devfn);
-	u32 data, mask;
-	int shift;
-
-	if (!addr)
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	addr += where & ~3;
-	data = readl_relaxed(addr);
-
-	switch (size) {
-	case 1:
-		shift = (where & 3) * 8;
-		mask = 0xff << shift;
-		data = (data & ~mask) | ((val & 0xff) << shift);
-		break;
-	case 2:
-		shift = (where & 3) * 8;
-		mask = 0xffff << shift;
-		data = (data & ~mask) | ((val & 0xffff) << shift);
-		break;
-	case 4:
-		data = val;
-		break;
-	default:
-		return PCIBIOS_BAD_REGISTER_NUMBER;
-	}
-
-	writel_relaxed(data, addr);
-
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static struct pci_ops rtl819x_pci_ops = {
-	.read	= rtl819x_pci_read,
-	.write	= rtl819x_pci_write,
+static struct pci_ops rtl819x_pcie_ops = {
+	.map_bus	= rtl819x_pcie_map_bus,
+	.read		= pci_generic_config_read,
+	.write		= pci_generic_config_write,
 };
 
 static void rtl819x_pcie_mdio_write(struct rtl819x_pcie *pcie, u32 reg, u32 data)
@@ -343,8 +271,7 @@ static void rtl819x_pcie_hw_init(struct rtl819x_pcie *pcie)
 
 	rtl819x_pcie_power_on(pcie);
 
-	pcie->link_up = rtl819x_pcie_link_up(pcie);
-	if (!pcie->link_up) {
+	if (!rtl819x_pcie_link_up(pcie)) {
 		dev_warn(pcie->dev, "PCIe link is down\n");
 		/*
 		 * Vendor fallback: gate the IP again so a half-trained
@@ -374,15 +301,18 @@ static void rtl819x_pcie_hw_init(struct rtl819x_pcie *pcie)
 static int rtl819x_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
-	struct device_node *np = dev->of_node;
 	struct rtl819x_pcie *pcie;
+	struct pci_host_bridge *bridge;
+	struct resource_entry *entry;
 	struct resource *res;
 
-	pcie = devm_kzalloc(dev, sizeof(*pcie), GFP_KERNEL);
-	if (!pcie)
+	bridge = devm_pci_alloc_host_bridge(dev, sizeof(*pcie));
+	if (!bridge)
 		return -ENOMEM;
 
+	pcie = pci_host_bridge_priv(bridge);
 	pcie->dev = dev;
+
 	pcie->data = of_device_get_match_data(dev);
 	if (!pcie->data)
 		return dev_err_probe(dev, -EINVAL,
@@ -391,7 +321,7 @@ static int rtl819x_pcie_probe(struct platform_device *pdev)
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
 		return dev_err_probe(dev, -EINVAL,
-					     "missing register resource 0\n");
+				     "missing register resource 0\n");
 	if (resource_size(res) != RTL819X_PCIE_RC_CFG_SIZE)
 		return dev_err_probe(dev, -EINVAL,
 				     "invalid root port config space size\n");
@@ -402,7 +332,7 @@ static int rtl819x_pcie_probe(struct platform_device *pdev)
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
 	if (!res)
 		return dev_err_probe(dev, -EINVAL,
-					     "missing register resource 1\n");
+				     "missing register resource 1\n");
 	if (resource_size(res) != RTL819X_PCIE_EP_CFG_SIZE)
 		return dev_err_probe(dev, -EINVAL,
 				     "invalid endpoint config space size\n");
@@ -413,7 +343,7 @@ static int rtl819x_pcie_probe(struct platform_device *pdev)
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 2);
 	if (!res)
 		return dev_err_probe(dev, -EINVAL,
-					     "missing register resource 2\n");
+				     "missing register resource 2\n");
 	if (resource_size(res) != RTL819X_PCIE_RC_EXT_SIZE)
 		return dev_err_probe(dev, -EINVAL,
 				     "invalid extended register size\n");
@@ -421,35 +351,23 @@ static int rtl819x_pcie_probe(struct platform_device *pdev)
 	if (IS_ERR(pcie->rc_ext))
 		return PTR_ERR(pcie->rc_ext);
 
-	pcie->sysc = syscon_regmap_lookup_by_phandle(np, "syscon");
+	pcie->sysc = syscon_regmap_lookup_by_phandle(dev->of_node, "syscon");
 	if (IS_ERR(pcie->sysc))
 		return dev_err_probe(dev, PTR_ERR(pcie->sysc),
 				     "failed to get system controller\n");
 
 	rtl819x_pcie_hw_init(pcie);
 
-	pcie->hose.pci_ops = &rtl819x_pci_ops;
-	pcie->hose.io_resource = &pcie->io_res;
-	pcie->hose.mem_resource = &pcie->mem_res;
-	pci_load_of_ranges(&pcie->hose, np);
-	if (!pcie->hose.mem_resource->start || !pcie->hose.io_resource->start)
+	/* The ranges property of the node must provide a memory window */
+	entry = resource_list_first_type(&bridge->windows, IORESOURCE_MEM);
+	if (!entry)
 		return dev_err_probe(dev, -EINVAL,
 				     "invalid or missing PCI ranges\n");
 
-	/*
-	 * Kernel I/O port numbers are bus addresses; subtract the base of
-	 * the mapped window so that both pci_iomap() and inb()/outb()
-	 * reach the same window.
-	 */
-	pcie->hose.io_map_base -= pcie->io_res.start;
-	set_io_port_base(pcie->hose.io_map_base);
+	bridge->sysdata = pcie;
+	bridge->ops = &rtl819x_pcie_ops;
 
-	ioport_resource.start = pcie->io_res.start;
-	ioport_resource.end = pcie->io_res.end;
-
-	register_pci_controller(&pcie->hose);
-
-	return 0;
+	return pci_host_probe(bridge);
 }
 
 static const struct of_device_id rtl819x_pcie_ids[] = {
@@ -467,12 +385,5 @@ static struct platform_driver rtl819x_pcie_driver = {
 };
 module_platform_driver(rtl819x_pcie_driver);
 
-int pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
-{
-	return of_irq_parse_and_map_pci(dev, slot, pin);
-}
-
-int pcibios_plat_dev_init(struct pci_dev *dev)
-{
-	return 0;
-}
+MODULE_DESCRIPTION("Realtek RTL819x PCIe host controller driver");
+MODULE_LICENSE("GPL");

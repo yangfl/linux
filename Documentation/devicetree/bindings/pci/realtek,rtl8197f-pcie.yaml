@@ -83,8 +83,7 @@ examples:
         compatible = "realtek,rtl8197f-pcie";
         reg = <0x18b00000 0x1000>, <0x18b10000 0x1000>, <0x18b01000 0x100>;
         reg-names = "rc_cfg", "ep_cfg", "rc_ext";
-        ranges = <0x01000000 0 0 0x18c00000 0 0x200000>,
-                 <0x02000000 0 0x19000000 0x19000000 0 0xc00000>;
+        ranges = <0x02000000 0 0x19000000 0x19000000 0 0xc00000>;
         syscon = <&syscon>;
 
         interrupt-parent = <&intc>;
