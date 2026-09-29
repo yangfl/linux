@@ -149,6 +149,20 @@
 
 &eth0 {
 	status = "okay";
+
+	/*
+	 * The GMAC serves the external switch's CPU port (port 6) over
+	 * RGMII.  The receive-clock compensation is owned by the switch
+	 * side (see the port@6 node above), so the MAC side stays plain
+	 * "rgmii".  The link is a point-to-point run inside the PCB, so
+	 * it is described as a fixed link.
+	 */
+	phy-mode = "rgmii";
+
+	fixed-link {
+		speed = <1000>;
+		full-duplex;
+	};
 };
 
 &switch {
