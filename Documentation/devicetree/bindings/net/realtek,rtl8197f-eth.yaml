@@ -21,6 +21,10 @@ description: |
   and are directed by the switch configuration; the destination port mask
   used on transmit can be selected with realtek,tx-portmask.
 
+  The MAC side of the CPU-port link is managed by phylink and the link must
+  be described with either a "fixed-link" sub-node (typical: the MAC is
+  wired point-to-point to a switch CPU port over RGMII) or a "phy-handle".
+
 properties:
   compatible:
     const: realtek,rtl8197f-eth
@@ -72,5 +76,12 @@ examples:
 
       realtek,tx-portmask = <0x1>;
       local-mac-address = [00 11 22 33 44 55];
+
+      /* RGMII to a switch CPU port with no extra delays on either end */
+      phy-mode = "rgmii";
+      fixed-link {
+        speed = <1000>;
+        full-duplex;
+      };
     };
 ...
