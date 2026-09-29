@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/realtek/realtek,rtl8197f-switch.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Realtek RTL8197F embedded Ethernet switch
+
+maintainers:
+  - David Yang <mmyangfl@gmail.com>
+
+description: |
+  The RTL8197F contains a 5+1 port Ethernet switch at a dedicated bus
+  window outside the internal peripheral bus.  No switch management
+  (L2, VLAN, offload) is implemented; the bootloader leaves the switch
+  configured.  The node only exists so that the register window is
+  claimed and the minimal bring-up steps the CPU-port NIC
+  (realtek,rtl8197f-eth) depends on are performed; it must be enabled
+  whenever the Ethernet MAC is used.
+
+  The CPU interface is a port of this switch, not a netdevice of its own:
+  frames it forwards only reach the host through the Ethernet MAC wired to
+  it, which is why the CPU port names that MAC with an "ethernet" phandle.
+
+properties:
+  compatible:
+    const: realtek,rtl8197f-switch
+
+  reg:
+    maxItems: 1
+
+  ports:
+    type: object
+    additionalProperties: false
+    properties:
+      "#address-cells":
+        const: 1
+      "#size-cells":
+        const: 0
+    patternProperties:
+      '^port@[0-9]$':
+        type: object
+        description: CPU interface port of the switch.
+        additionalProperties: false
+        properties:
+          reg:
+            description: Logical port number (the CPU interface is port 8).
+            minItems: 1
+            maxItems: 1
+          ethernet:
+            $ref: /schemas/types.yaml#/definitions/phandle
+            description:
+              phandle of the Ethernet MAC (realtek,rtl8197f-eth) that carries
+              this port's frames; the driver arms the switch-side descriptor
+              trigger for that interface.
+        required:
+          - reg
+          - ethernet
+    required:
+      - "#address-cells"
+      - "#size-cells"
+
+required:
+  - compatible
+  - reg
+  - ports
+
+additionalProperties: false
+
+examples:
+  - |
+    switch@1b800000 {
+        compatible = "realtek,rtl8197f-switch";
+        reg = <0x1b800000 0x500000>;
+
+        ports {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            port@8 {
+                reg = <8>;
+                ethernet = <&eth0>;
+            };
+        };
+    };
+...
