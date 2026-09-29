@@ -11,9 +11,17 @@ maintainers:
 
 description: |
   The RTL8197F (and other RTL819x SoCs) contain a SPI flash controller
-  derived from the DesignWare SSI, located at 0x18143000.  It is a
+  derived from the Synopsys DesignWare SSI, located at 0x18143000.  It is a
   half-duplex, single-lane controller intended to drive a SPI NOR flash
   chip, and works together with the SPI NOR framework (jedec,spi-nor).
+
+  The register layout follows the DesignWare APB SSI, but the transfer
+  engine carries vendor extensions and silicon quirks (flash-extension
+  registers, NDF frame-count semantics, unreliable RXFLR) which make it
+  incompatible with a plain DesignWare SSI in software.  It therefore
+  carries no "snps,dw-apb-ssi" fallback compatible and is driven by
+  drivers/spi/spi-realtek-rtl819x.c, which reuses the DesignWare core for the
+  host registration but replaces its mem-ops transfer engine.
 
   This controller is unrelated to the simpler SPI flash controller found in
   the Realtek Otto SoCs (RTL8380/8382/8391/8392/8393), which has a
@@ -30,13 +38,11 @@ properties:
   reg:
     maxItems: 1
 
+  interrupts:
+    maxItems: 1
+
   clocks:
     maxItems: 1
-    description:
-      Optional bus clock; when absent the driver falls back to
-      clock-frequency.
-
-  clock-frequency: true
 
   num-cs:
     description: Number of chip selects, up to 16.
@@ -48,6 +54,7 @@ properties:
 required:
   - compatible
   - reg
+  - clocks
   - "#address-cells"
   - "#size-cells"
 
@@ -55,10 +62,26 @@ unevaluatedProperties: false
 
 examples:
   - |
+    #include <dt-bindings/clock/realtek-rtl819x-clks.h>
+
+    syscon@18000000 {
+        compatible = "realtek,rtl8197f-syscon", "syscon", "simple-mfd";
+        reg = <0x18000000 0x200>;
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges = <0x0 0x18000000 0x200>;
+
+        sysclk: clock-controller@0 {
+            compatible = "realtek,rtl8197f-clock";
+            reg = <0x0 0x68>;
+            #clock-cells = <1>;
+        };
+    };
+
     spi0: spi@18143000 {
         compatible = "realtek,rtl8197f-spi";
         reg = <0x18143000 0x1000>;
-        clock-frequency = <200000000>;
+        clocks = <&sysclk RTL8197F_CLK_SPI>;
         num-cs = <1>;
         #address-cells = <1>;
         #size-cells = <0>;
@@ -66,7 +89,8 @@ examples:
         flash@0 {
             compatible = "jedec,spi-nor";
             reg = <0>;
-            spi-max-frequency = <50000000>;
+            /* the vendor-validated SPI clock / 8 */
+            spi-max-frequency = <12500000>;
 
             partitions {
                 compatible = "fixed-partitions";

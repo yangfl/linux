@@ -208,7 +208,7 @@
 			reg = <0x143000 0x1000>;
 			#address-cells = <1>;
 			#size-cells = <0>;
-			clock-frequency = <200000000>;
+			clocks = <&lxclk>;
 
 			status = "disabled";
 		};
