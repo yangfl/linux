@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/soc/realtek/realtek,rtl8197f-syscon.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: Realtek RTL8197F system controller
+
+maintainers:
+  - David Yang <mmyangfl@gmail.com>
+
+description: |
+  The RTL8197F system controller bundles miscellaneous SoC-wide registers
+  (pin multiplexing, bus and clock gates, strap options) behind a single
+  register window at 0x18000000.  It is exposed as a syscon so that
+  drivers for blocks without a dedicated region of their own (USB PHY,
+  PCIe) can reach the few registers they need.
+
+properties:
+  compatible:
+    items:
+      - const: realtek,rtl8197f-syscon
+      - const: syscon
+
+  reg:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    syscon@0 {
+        compatible = "realtek,rtl8197f-syscon", "syscon";
+        reg = <0x0 0x200>;
+    };
+...
