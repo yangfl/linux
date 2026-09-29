@@ -395,6 +395,7 @@ config SERIAL_8250_DFL
 config SERIAL_8250_DW
 	tristate "Support for Synopsys DesignWare 8250 quirks"
 	depends on SERIAL_8250
+	default MACH_REALTEK_RTL819X
 	select SERIAL_8250_DWLIB
 	help
 	  Selecting this option will enable handling of the extra features
