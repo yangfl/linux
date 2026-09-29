@@ -1,0 +1,247 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR BSD-2-Clause
+
+/ {
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	aliases {
+		serial0 = &uart0;
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			compatible = "mips,mips24KEc";
+			reg = <0>;
+			clocks = <&cpuclk>;
+		};
+	};
+
+	/*
+	 * Fixed-clock placeholders.  The RTL8197F derives these from the
+	 * 25 MHz crystal with strap-selectable PLL settings; the programmable
+	 * clock controller below replaces them.
+	 *
+	 * cpuclk is strap-dependent, not a family constant.
+	 */
+	xtal: clock-xtal {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <25000000>;
+	};
+
+	cpuclk: clock-cpu {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <999000000>;
+	};
+
+	lxclk: clock-lx {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <200000000>;
+	};
+
+	/*
+	 * Programmable clock provider (cpu/lx/uart/spi).  Uncomment and
+	 * drop the fixed-clock placeholders above to switch to it.
+	 *
+	 * sysclk: clock-controller@0 {
+	 *   compatible = "realtek,rtl8197f-clock";
+	 *   reg = <0x18000000 0x20>;
+	 *   clocks = <&xtal>;
+	 *   #clock-cells = <1>;
+	 * };
+	 */
+
+	cpuintc: interrupt-controller {
+		compatible = "mti,cpu-interrupt-controller";
+		#address-cells = <0>;
+		#interrupt-cells = <1>;
+		interrupt-controller;
+	};
+
+	soc@18000000 {
+		compatible = "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0x0 0x18000000 0x200000>;
+
+		syscon: syscon@0 {
+			compatible = "realtek,rtl8197f-syscon", "syscon";
+			reg = <0x0 0x200>;
+		};
+
+		intc: interrupt-controller@3000 {
+			compatible = "realtek,rtl8197f-intc";
+			reg = <0x3000 0x40>;
+			interrupt-controller;
+			#address-cells = <0>;
+			#interrupt-cells = <2>;
+
+			interrupt-parent = <&cpuintc>;
+			interrupts = <2>, <4>, <5>, <6>, <7>;
+		};
+
+		uart0: serial@147000 {
+			compatible = "realtek,rtl8197f-uart";
+			reg = <0x147000 0x100>;
+			reg-shift = <2>;
+			clock-frequency = <100000000>;
+
+			interrupt-parent = <&intc>;
+			interrupts = <9 4>;
+
+			status = "disabled";
+		};
+
+		gpio0: gpio@3500 {
+			compatible = "realtek,rtl8197f-gpio";
+			reg = <0x3500 0x1c>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+
+			interrupt-parent = <&intc>;
+			interrupts = <16 4>;
+
+			status = "disabled";
+		};
+
+		gpio1: gpio@351c {
+			compatible = "realtek,rtl8197f-gpio";
+			reg = <0x351c 0x1c>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+
+			interrupt-parent = <&intc>;
+			interrupts = <17 4>;
+
+			status = "disabled";
+		};
+
+		timer0: timer@3100 {
+			compatible = "realtek,rtl8197f-timer";
+			/*
+			 * The window covers CDBR (+0x18): this node owns
+			 * the shared pre-divider; the watchdog only reads
+			 * it back (see the timer binding).
+			 */
+			reg = <0x3100 0x20>;
+			interrupts = <7 4>;
+			interrupt-parent = <&intc>;
+			clocks = <&lxclk>;
+
+			status = "disabled";
+		};
+
+		wdt: watchdog@3118 {
+			compatible = "realtek,rtl8197f-wdt";
+			reg = <0x3118 0x8>;
+			clocks = <&lxclk>;
+
+			status = "disabled";
+		};
+
+		usbphy: usb-phy@140200 {
+			compatible = "realtek,rtl8197f-usbphy";
+			reg = <0x140200 0x18>, <0x210a4 0x4>;
+			reg-names = "analog", "utmi-acc";
+			syscon = <&syscon>;
+			#phy-cells = <1>;
+		};
+
+		/*
+		 * The USB host controllers are standard EHCI/OHCI with
+		 * little-endian MMIO; only the DMA descriptors are
+		 * big-endian on this IP, hence big-endian-desc.
+		 */
+		usb_ohci: usb-ohci@20000 {
+			compatible = "generic-ohci";
+			reg = <0x20000 0x1000>;
+			interrupt-parent = <&intc>;
+			interrupts = <13 4>;
+			phys = <&usbphy 0>, <&usbphy 1>;
+			big-endian-desc;
+
+			status = "disabled";
+		};
+
+		usb_ehci: usb-ehci@21000 {
+			compatible = "generic-ehci";
+			reg = <0x21000 0x1000>;
+			interrupt-parent = <&intc>;
+			interrupts = <13 4>;
+			phys = <&usbphy 0>, <&usbphy 1>;
+			big-endian-desc;
+
+			status = "disabled";
+		};
+
+		eth0: ethernet@10000 {
+			compatible = "realtek,rtl8197f-eth";
+			reg = <0x10000 0x100>;
+			reg-names = "nic";
+			interrupt-parent = <&intc>;
+			interrupts = <15 4>;
+
+			status = "disabled";
+		};
+
+		spi0: spi@143000 {
+			compatible = "realtek,rtl8197f-spi";
+			reg = <0x143000 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clock-frequency = <200000000>;
+
+			status = "disabled";
+		};
+	};
+
+	pcie: pcie@18b00000 {
+		compatible = "realtek,rtl8197f-pcie";
+		#address-cells = <3>;
+		#size-cells = <2>;
+		#interrupt-cells = <1>;
+		device_type = "pci";
+
+		reg = <0x18b00000 0x1000>,	/* root port config space */
+		      <0x18b10000 0x1000>,	/* downstream config window */
+		      <0x18b01000 0x100>;	/* MDIO / PWRCR / IPCFG */
+		reg-names = "rc_cfg", "ep_cfg", "rc_ext";
+
+		/*
+		 * The IO window decodes only 16 bits of bus address, so the
+		 * bus side starts at 0; IO BARs must not be assigned to
+		 * devices (see the controller binding).
+		 */
+		ranges = <0x01000000 0 0  0x18c00000  0 0x200000>,
+			 <0x02000000 0 0x19000000  0x19000000  0 0xc00000>;
+
+		syscon = <&syscon>;
+
+		/*
+		 * The root port interrupt is ICTL input 21 (routed to CPU
+		 * IP5 inside the controller); endpoint INTx are swizzled
+		 * onto the same input.  It must go through the ICTL
+		 * domain: the IP lines are chained handlers there and
+		 * cannot be requested directly.
+		 */
+		interrupt-parent = <&intc>;
+		interrupts = <21 4>;
+		interrupt-map-mask = <0 0 0 7>;
+		interrupt-map = <0 0 0 1 &intc 21 4>,
+				<0 0 0 2 &intc 21 4>,
+				<0 0 0 3 &intc 21 4>,
+				<0 0 0 4 &intc 21 4>;
+
+		status = "disabled";
+	};
+};
