@@ -23021,6 +23021,7 @@ F:	drivers/net/ethernet/realtek/rtl819x_eth.c
 F:	drivers/net/ethernet/realtek/rtl819x_switch.c
 F:	drivers/pci/controller/pci-realtek-rtl819x.c
 F:	drivers/phy/realtek/phy-rtl819x-usb.c
+F:	drivers/spi/spi-realtek-rtl819x.c
 F:	drivers/watchdog/realtek_rtl819x_wdt.c
 F:	include/dt-bindings/clock/realtek-rtl819x-clks.h
 

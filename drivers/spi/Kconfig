@@ -924,6 +924,19 @@ config SPI_REALTEK_SNAND
 	  This driver does not support generic SPI. The implementation
 	  only supports the spi-mem interface.
 
+config SPI_REALTEK_RTL819X
+	tristate "Realtek RTL819x SPI flash controller"
+	depends on MACH_REALTEK_RTL819X || COMPILE_TEST
+	depends on HAS_IOMEM
+	select SPI_DESIGNWARE
+	help
+	  This enables support for the SPI flash controller of the
+	  Realtek RTL819x SoCs (RTL8197F and friends).  The block is a
+	  DesignWare APB SSI with vendor flash extensions: it reuses the
+	  DesignWare core for the host registration, but implements its
+	  own mem-ops transfer engine, so it only serves SPI memory
+	  devices.
+
 config SPI_ROCKCHIP
 	tristate "Rockchip SPI controller driver"
 	depends on ARCH_ROCKCHIP || COMPILE_TEST
