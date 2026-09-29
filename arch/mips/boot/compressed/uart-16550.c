@@ -20,6 +20,11 @@
 #define PORT(offset) (CKSEG1ADDR(INGENIC_UART_BASE_ADDR) + (4 * offset))
 #endif
 
+#ifdef CONFIG_MACH_REALTEK_RTL819X
+#define RTL819X_UART_BASE	0x18147000
+#define PORT(offset)	(CKSEG1ADDR(RTL819X_UART_BASE) + (4 * (offset)))
+#endif
+
 #ifdef CONFIG_ECONET
 #define EN75_UART_BASE	0x1fbf0003
 #define PORT(offset)	(CKSEG1ADDR(EN75_UART_BASE) + (4 * (offset)))

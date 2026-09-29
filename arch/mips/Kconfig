@@ -729,6 +729,9 @@ config MACH_REALTEK_RTL819X
 	select USE_OF
 	select COMMON_CLK
 	select IRQ_REALTEK_RTL819X
+	select SYS_SUPPORTS_ZBOOT
+	select SYS_SUPPORTS_ZBOOT_UART16550
+	select DEBUG_ZBOOT if DEBUG_KERNEL
 	select HAVE_PCI
 	select BUILTIN_DTB if MIPS_NO_APPENDED_DTB
 	select USB_EHCI_BIG_ENDIAN_DESC if USB_SUPPORT
@@ -2130,6 +2133,7 @@ config MIPS_VA_BITS_48
 config ZBOOT_LOAD_ADDRESS
 	hex "Compressed kernel load address"
 	default 0xffffffff80400000 if BCM47XX
+	default 0x81300000 if MACH_REALTEK_RTL819X
 	default 0x0
 	depends on SYS_SUPPORTS_ZBOOT
 	help
