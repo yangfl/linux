@@ -13,7 +13,9 @@
  *    (register window, SMI pinmux, ACL workaround, TRXRDY trigger).
  *    This driver
  *    deliberately does not touch the switch L2 tables or offload engines;
- *  - no PHY management: the link is treated as always up;
+ *  - no PHY management of its own: the MAC side of the CPU-port link is
+ *    attached to phylink; boards wire the switch CPU port (RGMII on the
+ *    RTL8197F) either as a fixed-link or through a phy-handle;
  *  - hardware L2/L3/L4 offload (NAPT, hw checksum path via the switch
  *    lookup engine) is not used: every Tx descriptor is sent in
  *    "direct Tx" mode (no HW lookup, no bridging), checksums are done in
@@ -38,6 +40,7 @@
 #include <linux/of.h>
 #include <linux/of_net.h>
 #include <linux/platform_device.h>
+#include <linux/phylink.h>
 #include <linux/skbuff.h>
 #include <linux/if_vlan.h>
 #include <net/page_pool/helpers.h>
@@ -215,6 +218,9 @@ struct rtl819x_priv {
 	unsigned int		tx_dirty;	/* oldest not-yet-completed desc */
 
 	spinlock_t		tx_lock;	/* tx_curr / queue handling */
+
+	struct phylink		*phylink;
+	struct phylink_config	phylink_config;
 };
 
 /* ------------------------------------------------------------------ */
@@ -789,6 +795,8 @@ static int rtl819x_open(struct net_device *ndev)
 	       FIELD_PREP(RTL_DMA_CR0_LOFIFO, RTL_DMA_CR0_LOFIFO_MARK) |
 	       FIELD_PREP(RTL_DMA_CR0_HIFIFO, RTL_DMA_CR0_HIFIFO_MARK));
 
+	phylink_start(priv->phylink);
+
 	rtl_wr(priv, RTL_CPUIIMR, RTL_IRQ_ALL);
 
 	return 0;
@@ -805,6 +813,7 @@ static int rtl819x_stop(struct net_device *ndev)
 
 	netif_stop_queue(ndev);
 	napi_disable(&priv->napi);
+	phylink_stop(priv->phylink);
 
 	rtl_wr(priv, RTL_CPUIIMR, 0);
 	free_irq(priv->irq, ndev);
@@ -819,8 +828,44 @@ static int rtl819x_stop(struct net_device *ndev)
 }
 
 /* ------------------------------------------------------------------ */
-/* ethtool                                                             */
+/* phylink / ethtool                                                   */
 /* ------------------------------------------------------------------ */
+
+/*
+ * The NIC register window has no link/speed controls of its own: the CPU
+ * port runs point-to-point between this DMA engine and the switch's CPU
+ * port, whose far end (and RGMII delay configuration) is owned by the
+ * switch side of the board topology.  mac_config/mac_link_up/down
+ * therefore have nothing to program -- phylink is attached so the link
+ * state reported by ethtool and the netdev carrier reflect the fixed
+ * link (or PHY) described in the device tree.
+ */
+static void rtl819x_mac_config(struct phylink_config *config,
+			       unsigned int mode,
+			       const struct phylink_link_state *state)
+{
+}
+
+static void rtl819x_mac_link_down(struct phylink_config *config,
+				  unsigned int mode,
+				  phy_interface_t interface)
+{
+}
+
+static void rtl819x_mac_link_up(struct phylink_config *config,
+				struct phy_device *phy,
+				unsigned int mode,
+				phy_interface_t interface,
+				int speed, int duplex,
+				bool tx_pause, bool rx_pause)
+{
+}
+
+static const struct phylink_mac_ops rtl819x_phylink_mac_ops = {
+	.mac_config		= rtl819x_mac_config,
+	.mac_link_down		= rtl819x_mac_link_down,
+	.mac_link_up		= rtl819x_mac_link_up,
+};
 
 static void rtl819x_get_drvinfo(struct net_device *ndev,
 				struct ethtool_drvinfo *info)
@@ -830,9 +875,27 @@ static void rtl819x_get_drvinfo(struct net_device *ndev,
 		sizeof(info->bus_info));
 }
 
+static int rtl819x_get_link_ksettings(struct net_device *ndev,
+				      struct ethtool_link_ksettings *cmd)
+{
+	struct rtl819x_priv *priv = netdev_priv(ndev);
+
+	return phylink_ethtool_ksettings_get(priv->phylink, cmd);
+}
+
+static int rtl819x_set_link_ksettings(struct net_device *ndev,
+				      const struct ethtool_link_ksettings *cmd)
+{
+	struct rtl819x_priv *priv = netdev_priv(ndev);
+
+	return phylink_ethtool_ksettings_set(priv->phylink, cmd);
+}
+
 static const struct ethtool_ops rtl819x_ethtool_ops = {
 	.get_drvinfo		= rtl819x_get_drvinfo,
 	.get_link		= ethtool_op_get_link,
+	.get_link_ksettings	= rtl819x_get_link_ksettings,
+	.set_link_ksettings	= rtl819x_set_link_ksettings,
 };
 
 /* ------------------------------------------------------------------ */
@@ -1001,6 +1064,23 @@ static int rtl819x_probe(struct platform_device *pdev)
 	 */
 	ndev->max_mtu = RTL_RX_BUF_SIZE - ETH_HLEN - VLAN_HLEN - 4;
 
+	/*
+	 * The MAC talks RGMII to the switch CPU port; the delays are a
+	 * property of the board wiring and are described in DT (plain
+	 * "rgmii" or one of the rgmii-*-id variants).
+	 */
+	priv->phylink_config.dev = &ndev->dev;
+	priv->phylink_config.type = PHYLINK_NETDEV;
+	priv->phylink_config.mac_capabilities = MAC_ASYM_PAUSE |
+						MAC_SYM_PAUSE |
+						MAC_10 | MAC_100 |
+						MAC_1000FD;
+	phy_interface_set_rgmii(priv->phylink_config.supported_interfaces);
+
+	ndev->tstats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
+	if (!ndev->tstats)
+		return -ENOMEM;
+
 	netif_napi_add(ndev, &priv->napi, rtl819x_poll);
 
 	/*
@@ -1025,15 +1105,35 @@ static int rtl819x_probe(struct platform_device *pdev)
 		goto err_napi;
 	}
 
+	priv->phylink = phylink_create(&priv->phylink_config, pdev->dev.fwnode,
+				       PHY_INTERFACE_MODE_NA,
+				       &rtl819x_phylink_mac_ops);
+	if (IS_ERR(priv->phylink)) {
+		ret = PTR_ERR(priv->phylink);
+		goto err_pool;
+	}
+
+	/*
+	 * A fixed-link node or a phy-handle below the ethernet node is
+	 * mandatory: without one there is nothing that reports the
+	 * CPU-port link state.
+	 */
+	ret = phylink_of_phy_connect(priv->phylink, pdev->dev.of_node, 0);
+	if (ret)
+		goto err_phylink;
+
 	ret = register_netdev(ndev);
 	if (ret)
-		goto err_pool;
+		goto err_phylink;
 
 	netdev_info(ndev, "RTL8197F switch CPU port: %pM, irq %d, tx-portmask 0x%02x\n",
 		    ndev->dev_addr, priv->irq, priv->tx_portmask);
 
 	return 0;
 
+err_phylink:
+	phylink_disconnect_phy(priv->phylink);
+	phylink_destroy(priv->phylink);
 err_pool:
 	page_pool_destroy(priv->rx_pool);
 err_napi:
@@ -1048,8 +1148,11 @@ static void rtl819x_remove(struct platform_device *pdev)
 	struct rtl819x_priv *priv = netdev_priv(ndev);
 
 	unregister_netdev(ndev);
+	phylink_disconnect_phy(priv->phylink);
+	phylink_destroy(priv->phylink);
 	netif_napi_del(&priv->napi);
 	page_pool_destroy(priv->rx_pool);
+	free_percpu(ndev->tstats);
 }
 
 static const struct of_device_id rtl819x_of_match[] = {

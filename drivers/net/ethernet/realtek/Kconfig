@@ -136,6 +136,7 @@ config RTL819X_ETH
 	default MACH_REALTEK_RTL819X
 	select MII
 	select PAGE_POOL
+	select PHYLINK
 	help
 	  This driver provides basic (experimental) support for the Ethernet
 	  MAC / embedded switch CPU interface found in the Realtek RTL819xF
