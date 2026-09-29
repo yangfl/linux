@@ -27,6 +27,7 @@
  * Vendor register names are kept in comments to ease cross-checking.
  */
 
+#include <linux/bitfield.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/dma-mapping.h>
@@ -59,6 +60,27 @@
 #define RTL_DMA_CR0		0x3c	/* DMA control 0 (FIFO watermarks) */
 #define RTL_DMA_CR1		0x40	/* DMA control 1 (Tx ring0 tail offset) */
 #define RTL_DMA_CR4		0xa0	/* DMA control 4 (Tx ring0 tail aware) */
+#define RTL_CPUICR1		0xa4	/* CPU interface control 1 */
+
+/* RTL_DMA_CR0 [15:8] = HiFifoMark, [7:0] = LowFifoMark.  Vendor
+ * rtl865x_start() restores 0xA0/0xA0 for the 8197F because the defaults
+ * (0x57) are clobbered when the bus burst size changes.  The upper half
+ * of the register holds unrelated fields and is preserved by the
+ * read-modify-write.
+ */
+#define RTL_DMA_CR0_HIFIFO	GENMASK(15, 8)
+#define RTL_DMA_CR0_LOFIFO	GENMASK(7, 0)
+#define RTL_DMA_CR0_HIFIFO_MARK	0xa0
+#define RTL_DMA_CR0_LOFIFO_MARK	0xa0
+
+/*
+ * RTL_CPUICR1 [9:8] selects the descriptor format the DMA consumes:
+ * 00 = classic 4-byte pkthdr pointers, 01 = the RTL8198C/8197F 6-word
+ * descriptor ("shortcut"/LSO) format, which is what the vendor SDK
+ * programs in re865x_probe() and what this driver's rings use.
+ */
+#define RTL_CPUICR1_PKTHDR	GENMASK(9, 8)
+#define RTL_CPUICR1_PKTHDR_SHORTCUT	FIELD_PREP(RTL_CPUICR1_PKTHDR, 1)
 
 /* RTL_CPUICR bits (rtl865xc_asicregs.h) */
 #define RTL_TXCMD		BIT(31)		/* Tx DMA enable */
@@ -71,7 +93,6 @@
  * write-one-to-clear.
  */
 #define RTL_LINK_CHANGE_IE	BIT(31)
-#define RTL_PKTHDR_RUNOUT_IE_ALL (0x3fU << 17)
 #define RTL_TX_DONE_IE1		BIT(10)
 #define RTL_TX_DONE_IE0		BIT(9)
 #define RTL_TX_ALL_DONE_IE3	BIT(13)
@@ -451,14 +472,6 @@ rearm:
 
 	/* ---- Tx completion ---- */
 	/*
-	 * PKTHDR_RUNOUT is not enabled in RTL_IRQ_ALL (see its comment),
-	 * but its pending bit still latches while the ring is starved;
-	 * clear it here so it does not accumulate across the refill
-	 * above, which re-armed the descriptors.
-	 */
-	rtl_wr(priv, RTL_CPUIISR, RTL_PKTHDR_RUNOUT_IE_ALL);
-
-	/*
 	 * The tx ring indices are also reset by tx_timeout(); the lock keeps
 	 * the completion walk here from racing the reset.
 	 */
@@ -752,12 +765,12 @@ static int rtl819x_open(struct net_device *ndev)
 	rtl_wr(priv, RTL_DMA_CR4, BIT(0));	/* TX_RING0_TAIL_AWARE */
 
 	/*
-	 * CPUICR1: select the new (RTL8198C/8197F) 6-word descriptor
-	 * format via TX_PKTHDR_SHORTCUT_LSO ([9:8]=01), as the vendor SDK
-	 * does in re865x_probe().  In the reset/classic mode ([9:8]=00)
-	 * the DMA consumes 4-byte pkthdr pointers instead.
+	 * CPUICR1: select the 6-word descriptor format (see the
+	 * RTL_CPUICR1_PKTHDR comment).
 	 */
-	rtl_wr(priv, 0xa4, (rtl_rr(priv, 0xa4) & ~0x300) | 0x100);
+	rtl_wr(priv, RTL_CPUICR1,
+	       (rtl_rr(priv, RTL_CPUICR1) & ~RTL_CPUICR1_PKTHDR) |
+	       RTL_CPUICR1_PKTHDR_SHORTCUT);
 
 	/* clear any stale interrupt status, then start DMA */
 	rtl_wr(priv, RTL_CPUIISR, rtl_rr(priv, RTL_CPUIISR));
@@ -765,23 +778,18 @@ static int rtl819x_open(struct net_device *ndev)
 	       RTL_TXCMD | RTL_RXCMD | RTL_BUSBURST_128W | RTL_MBUF_2048B);
 
 	/*
-	 * DMA_CR0 FIFO watermarks: vendor (rtl865x_asicCom.c
-	 * rtl865x_start()) restores 0xA0/0xA0 for the 8197F because the
-	 * defaults (0x57) are clobbered when the burst size changes.
-	 * LowFifoMark at bits [15:8], HiFifoMark at bits [7:0].  The upper
-	 * half of the register holds unrelated fields (measured 0x0003 on a
-	 * working system) and must be preserved with a read-modify-write.
-	 * This must happen after the last CPUICR write: updating the burst
+	 * DMA_CR0 FIFO watermarks: the vendor values and the reason for
+	 * the read-modify-write are at the RTL_DMA_CR0_* defines.  This
+	 * must happen after the last CPUICR write: updating the burst
 	 * size field resets HiFifoMark to 0x57.
 	 */
 	rtl_wr(priv, RTL_DMA_CR0,
-	       (rtl_rr(priv, RTL_DMA_CR0) & 0xffff0000) | 0xa0a0);
+	       (rtl_rr(priv, RTL_DMA_CR0) &
+		~(RTL_DMA_CR0_LOFIFO | RTL_DMA_CR0_HIFIFO)) |
+	       FIELD_PREP(RTL_DMA_CR0_LOFIFO, RTL_DMA_CR0_LOFIFO_MARK) |
+	       FIELD_PREP(RTL_DMA_CR0_HIFIFO, RTL_DMA_CR0_HIFIFO_MARK));
 
 	rtl_wr(priv, RTL_CPUIIMR, RTL_IRQ_ALL);
-
-	netdev_info(ndev, "opened: irq %d, CPUICR=%08x CPUICR1=%08x IMR=%08x\n",
-		    priv->irq, rtl_rr(priv, RTL_CPUICR), rtl_rr(priv, 0xa4),
-		    rtl_rr(priv, RTL_CPUIIMR));
 
 	return 0;
 
@@ -841,8 +849,9 @@ static void rtl819x_eth_tx_timeout(struct net_device *ndev, unsigned int txqueue
 	struct rtl819x_priv *priv = netdev_priv(ndev);
 	unsigned int i;
 
-	netdev_warn(ndev, "tx timeout (queue %u): CPUICR=%08x CPUICR1=%08x IMR=%08x ISR=%08x tx_curr=%u tx_dirty=%d rx_dirty=%u\n",
-		    txqueue, rtl_rr(priv, RTL_CPUICR), rtl_rr(priv, 0xa4),
+	netdev_warn(ndev,
+		    "tx timeout (queue %u): CPUICR=%08x CPUICR1=%08x IMR=%08x ISR=%08x tx_curr=%u tx_dirty=%d rx_dirty=%u\n",
+		    txqueue, rtl_rr(priv, RTL_CPUICR), rtl_rr(priv, RTL_CPUICR1),
 		    rtl_rr(priv, RTL_CPUIIMR), rtl_rr(priv, RTL_CPUIISR),
 		    priv->tx_curr, priv->tx_dirty, priv->rx_dirty);
 
@@ -891,7 +900,9 @@ static void rtl819x_eth_tx_timeout(struct net_device *ndev, unsigned int txqueue
 	rtl_wr(priv, RTL_DMA_CR1,
 	       (RTL_NUM_TX_DESC - 1) * sizeof(*priv->tx_ring));
 	rtl_wr(priv, RTL_DMA_CR4, BIT(0));
-	rtl_wr(priv, 0xa4, (rtl_rr(priv, 0xa4) & ~0x300) | 0x100);
+	rtl_wr(priv, RTL_CPUICR1,
+	       (rtl_rr(priv, RTL_CPUICR1) & ~RTL_CPUICR1_PKTHDR) |
+	       RTL_CPUICR1_PKTHDR_SHORTCUT);
 	rtl_wr(priv, RTL_CPUIISR, rtl_rr(priv, RTL_CPUIISR));
 	rtl_wr(priv, RTL_CPUICR,
 	       RTL_TXCMD | RTL_RXCMD | RTL_BUSBURST_128W | RTL_MBUF_2048B);
@@ -900,7 +911,10 @@ static void rtl819x_eth_tx_timeout(struct net_device *ndev, unsigned int txqueue
 	 * write: updating the burst size field resets HiFifoMark to 0x57.
 	 */
 	rtl_wr(priv, RTL_DMA_CR0,
-	       (rtl_rr(priv, RTL_DMA_CR0) & 0xffff0000) | 0xa0a0);
+	       (rtl_rr(priv, RTL_DMA_CR0) &
+		~(RTL_DMA_CR0_LOFIFO | RTL_DMA_CR0_HIFIFO)) |
+	       FIELD_PREP(RTL_DMA_CR0_LOFIFO, RTL_DMA_CR0_LOFIFO_MARK) |
+	       FIELD_PREP(RTL_DMA_CR0_HIFIFO, RTL_DMA_CR0_HIFIFO_MARK));
 
 	netif_wake_queue(ndev);
 	rtl_wr(priv, RTL_CPUIIMR, RTL_IRQ_ALL);
