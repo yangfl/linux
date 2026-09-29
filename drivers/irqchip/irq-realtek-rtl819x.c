@@ -20,11 +20,12 @@
  * (unlike the big-endian Otto RTL83xx controller, whose routing values are
  * biased by one) and 0 disconnects the input.
  *
- * Most inputs are routed to IP2 and handled through the single cascaded
- * parent listed in DT, but the RTL8197F wires a few high-priority sources
- * straight to dedicated CPU lines (IP4-IP7).  The driver therefore supports
- * up to five parent interrupts in DT; each parent handles the inputs whose
- * fixed routing targets its CPU line.
+ * The interrupt specifiers are two cells, <input output>: the first cell is
+ * the input number, the second one the index of the parent interrupt (in
+ * the controller node's "interrupts" list) whose CPU line the input is
+ * wired to.  As on the Otto controller, the routing nibble is written when
+ * the input is mapped, and inputs never referenced from DT stay
+ * disconnected (their IRR field is cleared at probe time).
  *
  * Copyright (C) 2026 David Yang <mmyangfl@gmail.com>
  *
@@ -40,6 +41,7 @@
 #include <linux/irqdomain.h>
 #include <linux/of_address.h>
 #include <linux/of_irq.h>
+#include <linux/slab.h>
 #include <linux/spinlock.h>
 
 /* Bank 0: global interrupt mask / status, inputs 0-31 */
@@ -62,7 +64,6 @@
 #define RTL819X_IRR_BANK_STRIDE		0x20
 #define RTL819X_MAX_INPUTS		64
 #define RTL819X_NUM_BANK_INPUTS		32
-#define RTL819X_INPUTS_PER_IRR		8
 
 /*
  * Bank 0 input 31 aggregates bank 1.  Its GIMR bit must stay enabled for
@@ -118,67 +119,61 @@ static const struct of_device_id rtl819x_ictl_of_match[] = {
 	{ /* sentinel */ }
 };
 
+struct rtl819x_output {
+	struct fwnode_handle		*fwnode;
+	struct irq_domain		*domain;
+	struct rtl819x_ictl		*ictl;
+	unsigned int			parent_irq;
+	unsigned int			line;
+	unsigned int			index;
+	/* inputs routed to this output: bank 0 in the low half */
+	u64				mask;
+};
+
 /**
  * struct rtl819x_ictl - driver private data
  * @data: per-compatible controller geometry
  * @base: remapped register block
- * @lock: protects read-modify-write cycles on the mask registers
- * @domain: IRQ domain covering all inputs
- * @line_mask: per CPU line, bitmask of bank inputs routed to it
+ * @lock: protects read-modify-write cycles on the mask and routing
+ *	registers
+ * @num_outputs: number of entries in @outputs
+ * @outputs: the controller's parent outputs; the chained handlers
+ *	installed for them reference this array, so it lives and dies
+ *	with the controller
  */
 struct rtl819x_ictl {
 	const struct rtl819x_ictl_data	*data;
 	void __iomem			*base;
 	raw_spinlock_t			lock;
-	struct irq_domain		*domain;
-	u32				line_mask[RTL819X_NUM_CPU_LINES][2];
+	unsigned int			num_outputs;
+	/* parent outputs, referenced by the chained handlers for as long
+	 * as the controller lives; must stay the last member
+	 */
+	struct rtl819x_output		outputs[] __counted_by(num_outputs);
 };
 
-struct rtl819x_output {
-	struct rtl819x_ictl		*ictl;
-	unsigned int			parent_irq;
-	unsigned int			line;
-};
-
-/*
- * Fixed routing table, mirroring the RTL8197F vendor defaults:
- *
- *	input  9  UART0         -> IP2 (generic)
- *	input 12  USB OTG       -> IP2 (generic)
- *	input 13  USB host      -> IP2 (generic)
- *	input  7  TIMER0         -> IP2 (system tick)
- *	input 15  switch core   -> IP4
- *	input 16  GPIO A-D      -> IP2 (generic)
- *	input 17  GPIO E-H      -> IP2 (generic)
- *	input 21  PCIe          -> IP5
- *	input 29  WLAN MAC      -> IP6
- *	input 47  CPU SI timer  -> IP7
- *
- * The core never asserts the CP0 Compare interrupt on an IP line itself
- * (it only raises Cause.TI); the SoC controller observes it as input 47
- * ("CPU SI timer"), which is routed to IP7 and drives the r4k clock
- * event device through this controller.
- *
- * TODO: express the routing in DT with an interrupts-extended entry per
- * input instead, and drop this hard-coded table.
- */
-static const u8 rtl819x_routing[RTL819X_MAX_INPUTS] = {
-	[7]  = 2,
-	[9]  = 2,
-	[12] = 2,
-	[13] = 2,
-	[15] = 4,
-	[16] = 2,
-	[17] = 2,
-	[21] = 5,
-	[29] = 6,
-	[47] = 7,
-};
-
-static void rtl819x_ictl_mask_bank(struct rtl819x_ictl *ictl,
-				   unsigned int bank, unsigned int input,
-				   bool mask)
+/* Write the routing nibble of one input; caller holds ictl->lock. */
+static void rtl819x_write_irr(struct rtl819x_ictl *ictl, unsigned int hwirq,
+			      unsigned int line)
 {
+	unsigned int bank = hwirq / RTL819X_NUM_BANK_INPUTS;
+	void __iomem *irr;
+	u32 val;
+
+	irr = bank_reg(ictl, bank,
+		       bank ? RTL819X_IRR4 : RTL819X_IRR0) +
+	      (hwirq % RTL819X_NUM_BANK_INPUTS) / 8 * sizeof(u32);
+
+	val = readl(irr);
+	val &= ~(0xfu << (hwirq % 8) * 4);
+	val |= line << (hwirq % 8) * 4;
+	writel(val, irr);
+}
+
+static void rtl819x_ictl_mask_input(struct rtl819x_ictl *ictl,
+				    unsigned int hwirq, bool mask)
+{
+	unsigned int bank = hwirq / RTL819X_NUM_BANK_INPUTS;
 	void __iomem *reg;
 	u32 val;
 
@@ -187,28 +182,20 @@ static void rtl819x_ictl_mask_bank(struct rtl819x_ictl *ictl,
 	guard(raw_spinlock_irqsave)(&ictl->lock);
 	val = readl(reg);
 	if (mask)
-		val &= ~BIT(input);
+		val &= ~BIT(hwirq % RTL819X_NUM_BANK_INPUTS);
 	else
-		val |= BIT(input);
+		val |= BIT(hwirq % RTL819X_NUM_BANK_INPUTS);
 	writel(val, reg);
 }
 
 static void rtl819x_ictl_mask(struct irq_data *d)
 {
-	struct rtl819x_ictl *ictl = irq_data_get_irq_chip_data(d);
-	unsigned int bank = d->hwirq / RTL819X_NUM_BANK_INPUTS;
-
-	rtl819x_ictl_mask_bank(ictl, bank, d->hwirq % RTL819X_NUM_BANK_INPUTS,
-			       true);
+	rtl819x_ictl_mask_input(irq_data_get_irq_chip_data(d), d->hwirq, true);
 }
 
 static void rtl819x_ictl_unmask(struct irq_data *d)
 {
-	struct rtl819x_ictl *ictl = irq_data_get_irq_chip_data(d);
-	unsigned int bank = d->hwirq / RTL819X_NUM_BANK_INPUTS;
-
-	rtl819x_ictl_mask_bank(ictl, bank, d->hwirq % RTL819X_NUM_BANK_INPUTS,
-			       false);
+	rtl819x_ictl_mask_input(irq_data_get_irq_chip_data(d), d->hwirq, false);
 }
 
 static struct irq_chip rtl819x_ictl_chip = {
@@ -220,7 +207,8 @@ static struct irq_chip rtl819x_ictl_chip = {
 static int rtl819x_ictl_map(struct irq_domain *d, unsigned int virq,
 			    irq_hw_number_t hwirq)
 {
-	struct rtl819x_ictl *ictl = d->host_data;
+	struct rtl819x_output *output = d->host_data;
+	struct rtl819x_ictl *ictl = output->ictl;
 
 	if (hwirq >= ictl->data->num_inputs ||
 	    (ictl->data->num_banks > 1 && hwirq == RTL819X_AGGREGATOR_INPUT))
@@ -229,28 +217,44 @@ static int rtl819x_ictl_map(struct irq_domain *d, unsigned int virq,
 	irq_set_chip_data(virq, ictl);
 	irq_set_chip_and_handler(virq, &rtl819x_ictl_chip, handle_level_irq);
 
+	guard(raw_spinlock_irqsave)(&ictl->lock);
+	output->mask |= BIT_ULL(hwirq);
+	rtl819x_write_irr(ictl, hwirq, output->line);
+
 	return 0;
+}
+
+static int rtl819x_ictl_select(struct irq_domain *d, struct irq_fwspec *fwspec,
+			       enum irq_domain_bus_token bus_token)
+{
+	struct rtl819x_output *output = d->host_data;
+
+	if (fwspec->fwnode != output->fwnode || fwspec->param_count != 2)
+		return false;
+
+	return fwspec->param[1] == output->index;
 }
 
 static const struct irq_domain_ops rtl819x_ictl_domain_ops = {
 	.map	= rtl819x_ictl_map,
-	.xlate	= irq_domain_xlate_twocell,
+	.select	= rtl819x_ictl_select,
+	.xlate	= irq_domain_xlate_onecell,
 };
 
-static bool rtl819x_ictl_dispatch_bank(struct rtl819x_ictl *ictl,
+static bool rtl819x_ictl_dispatch_bank(struct rtl819x_output *output,
 				       unsigned int bank, u32 mask)
 {
-	void __iomem *gimr = bank_reg(ictl, bank,
-				      bank ? RTL819X_GIMR2 : RTL819X_GIMR);
-	void __iomem *gisr = bank_reg(ictl, bank,
-				      bank ? RTL819X_GISR2 : RTL819X_GISR);
+	struct rtl819x_ictl *ictl = output->ictl;
 	unsigned long pending;
 	unsigned int input;
 
-	pending = readl(gisr) & readl(gimr) & mask;
+	pending = readl(bank_reg(ictl, bank,
+				 bank ? RTL819X_GISR2 : RTL819X_GISR)) &
+		  readl(bank_reg(ictl, bank,
+				 bank ? RTL819X_GIMR2 : RTL819X_GIMR)) & mask;
 
 	for_each_set_bit(input, &pending, RTL819X_NUM_BANK_INPUTS)
-		generic_handle_domain_irq(ictl->domain,
+		generic_handle_domain_irq(output->domain,
 					  bank * RTL819X_NUM_BANK_INPUTS +
 					  input);
 
@@ -262,7 +266,6 @@ static void rtl819x_ictl_dispatch(struct irq_desc *desc)
 	struct rtl819x_output *output = irq_desc_get_handler_data(desc);
 	struct rtl819x_ictl *ictl = output->ictl;
 	struct irq_chip *chip = irq_desc_get_chip(desc);
-	unsigned long raw, pending;
 	bool handled = false;
 
 	chained_irq_enter(chip, desc);
@@ -276,17 +279,11 @@ static void rtl819x_ictl_dispatch(struct irq_desc *desc)
 	 * never seen here.
 	 */
 	if (ictl->data->num_banks > 1)
-		handled |= rtl819x_ictl_dispatch_bank(ictl, 1,
-						      ictl->line_mask[output->line][1]);
+		handled |= rtl819x_ictl_dispatch_bank(output, 1,
+						      output->mask >> 32);
 
-	raw = readl(bank_reg(ictl, 0, RTL819X_GISR)) &
-	      readl(bank_reg(ictl, 0, RTL819X_GIMR));
-
-	pending = raw & ictl->line_mask[output->line][0];
-	if (pending) {
-		rtl819x_ictl_dispatch_bank(ictl, 0, pending);
-		handled = true;
-	}
+	if (output->mask & GENMASK_ULL(31, 0))
+		handled |= rtl819x_ictl_dispatch_bank(output, 0, output->mask);
 
 	if (!handled)
 		spurious_interrupt();
@@ -294,101 +291,42 @@ static void rtl819x_ictl_dispatch(struct irq_desc *desc)
 	chained_irq_exit(chip, desc);
 }
 
-/*
- * Program IRR0-IRR7 with the fixed routing table.  Each IRR covers eight
- * inputs; the nibble for input i sits at bits (4 * i), i.e. the field for
- * the lowest input of a register is LSB-first (bspchip.h IRR_IPtoCPU()
- * places input a0..a3 in bits 3:0).
- */
-static void rtl819x_ictl_setup_routing(struct rtl819x_ictl *ictl)
+static void rtl819x_ictl_clear_routing(struct rtl819x_ictl *ictl)
 {
-	unsigned int bank, reg, i, input;
-	const struct rtl819x_ictl_data *data = ictl->data;
+	unsigned int bank, reg;
 
-	for (bank = 0; bank < data->num_banks; bank++) {
-		for (reg = 0; reg < RTL819X_NUM_BANK_INPUTS / RTL819X_INPUTS_PER_IRR; reg++) {
-			void __iomem *irr;
-			u32 val = 0;
-
-			for (i = 0; i < RTL819X_INPUTS_PER_IRR; i++) {
-				input = reg * RTL819X_INPUTS_PER_IRR + i;
-				/*
-				 * Unrouted bank 1 inputs default to the
-				 * generic line, matching the dispatch
-				 * side: they stay masked in GIMR2 until a
-				 * domain consumer unmasks them.
-				 */
-				u8 route = rtl819x_routing[bank * RTL819X_NUM_BANK_INPUTS + input];
-
-				if (!route && bank == 1)
-					route = RTL819X_CPU_LINE_MIN;
-				val |= route << (i % RTL819X_INPUTS_PER_IRR) * 4;
-			}
-
-			/*
-			 * Unlike the mask/status registers, the bank 1 IRRs
-			 * follow the bank 0 IRRs contiguously at their own
-			 * absolute offsets (IRR4-7), not at +0x20.
-			 */
-			irr = ictl->base + (bank ? RTL819X_IRR4 : RTL819X_IRR0) +
-			      reg * sizeof(u32);
-			writel(val, irr);
-		}
-	}
+	for (bank = 0; bank < ictl->data->num_banks; bank++)
+		for (reg = 0; reg < RTL819X_NUM_BANK_INPUTS / 8; reg++)
+			writel(0, bank_reg(ictl, bank,
+					   bank ? RTL819X_IRR4 : RTL819X_IRR0) +
+				   reg * sizeof(u32));
 }
 
-static void __init rtl819x_ictl_setup_line_masks(struct rtl819x_ictl *ictl)
-{
-	unsigned int input, line;
-	const struct rtl819x_ictl_data *data = ictl->data;
-
-	/*
-	 * Bank 1 inputs without an explicit route reach IP2 through the
-	 * input 31 aggregator.
-	 */
-	for (input = 0; input < data->num_inputs; input++) {
-		unsigned int bank = input / RTL819X_NUM_BANK_INPUTS;
-
-		if (input == RTL819X_AGGREGATOR_INPUT)
-			continue;
-
-		line = rtl819x_routing[input];
-		if (!line && bank == 1)
-			line = RTL819X_CPU_LINE_MIN;
-
-		ictl->line_mask[line][bank] |=
-			BIT(input % RTL819X_NUM_BANK_INPUTS);
-	}
-}
-
-static int __init rtl819x_ictl_setup_parents(struct device_node *node,
-					     struct rtl819x_ictl *ictl)
+static int rtl819x_ictl_setup_parents(struct device_node *node,
+				      struct rtl819x_ictl *ictl)
 {
 	bool line_claimed[RTL819X_NUM_CPU_LINES] = { };
-	struct rtl819x_output *outputs;
-	unsigned int p, line, cnt;
-	int parent_irq;
+	unsigned int p, cnt, line;
+	int parent_irq, ret;
 
 	cnt = of_irq_count(node);
 	if (!cnt)
 		return -EINVAL;
-
-	outputs = kcalloc(cnt, sizeof(*outputs), GFP_KERNEL);
-	if (!outputs)
-		return -ENOMEM;
+	ictl->num_outputs = cnt;
 
 	for (p = 0; p < cnt; p++) {
 		struct irq_data *parent_data;
+		struct irq_domain *domain;
 
 		parent_irq = of_irq_get(node, p);
 		if (parent_irq <= 0) {
-			parent_irq = parent_irq ? parent_irq : -ENODEV;
+			ret = parent_irq ?: -ENODEV;
 			goto err_out;
 		}
 
 		parent_data = irq_get_irq_data(parent_irq);
 		if (!parent_data) {
-			parent_irq = -EINVAL;
+			ret = -EINVAL;
 			goto err_out;
 		}
 
@@ -397,57 +335,56 @@ static int __init rtl819x_ictl_setup_parents(struct device_node *node,
 			pr_err("%pOF: parent interrupt %d is not a CPU line %u-%u\n",
 			       node, parent_irq, RTL819X_CPU_LINE_MIN,
 			       RTL819X_CPU_LINE_MAX);
-			parent_irq = -EINVAL;
+			ret = -EINVAL;
 			goto err_out;
 		}
 
 		if (line_claimed[line]) {
 			pr_err("%pOF: parent interrupt %d claims CPU line %u twice\n",
 			       node, parent_irq, line);
-			parent_irq = -EINVAL;
+			ret = -EINVAL;
+			goto err_out;
+		}
+		line_claimed[line] = true;
+
+		domain = irq_domain_create_linear(of_fwnode_handle(node),
+						  ictl->data->num_inputs,
+						  &rtl819x_ictl_domain_ops,
+						  &ictl->outputs[p]);
+		if (!domain) {
+			ret = -ENOMEM;
 			goto err_out;
 		}
 
-		if (!ictl->line_mask[line][0] && !ictl->line_mask[line][1])
-			pr_warn("%pOF: no inputs routed to parent CPU line %u\n",
-				node, line);
-
-		line_claimed[line] = true;
-		outputs[p].ictl = ictl;
-		outputs[p].parent_irq = parent_irq;
-		outputs[p].line = line;
+		ictl->outputs[p].domain = domain;
+		ictl->outputs[p].fwnode = of_fwnode_handle(node);
+		ictl->outputs[p].ictl = ictl;
+		ictl->outputs[p].index = p;
+		ictl->outputs[p].parent_irq = parent_irq;
+		ictl->outputs[p].line = line;
 		irq_set_chained_handler_and_data(parent_irq,
 						 rtl819x_ictl_dispatch,
-						 &outputs[p]);
-	}
-
-	/*
-	 * Warn about inputs whose fixed routing targets a CPU line missing
-	 * from DT so they are not silently lost.
-	 */
-	for (line = RTL819X_CPU_LINE_MIN; line <= RTL819X_CPU_LINE_MAX; line++) {
-		if ((ictl->line_mask[line][0] || ictl->line_mask[line][1]) &&
-		    !line_claimed[line])
-			pr_warn("%pOF: inputs routed to CPU line %u but no matching parent\n",
-				node, line);
+						 &ictl->outputs[p]);
 	}
 
 	return 0;
 
 err_out:
-	while (p--)
-		irq_set_chained_handler_and_data(outputs[p].parent_irq,
+	while (p--) {
+		irq_set_chained_handler_and_data(ictl->outputs[p].parent_irq,
 						 NULL, NULL);
-	kfree(outputs);
-	return parent_irq;
+		irq_domain_remove(ictl->outputs[p].domain);
+	}
+
+	return ret;
 }
 
 static int __init rtl819x_ictl_of_init(struct device_node *node,
 				       struct device_node *parent)
 {
-	struct rtl819x_ictl *ictl;
 	const struct rtl819x_ictl_data *data;
 	const struct of_device_id *match;
+	struct rtl819x_ictl *ictl;
 	unsigned int bank;
 	int ret;
 
@@ -456,7 +393,8 @@ static int __init rtl819x_ictl_of_init(struct device_node *node,
 		return -EINVAL;
 	data = match->data;
 
-	ictl = kzalloc_obj(*ictl, GFP_KERNEL);
+	ictl = kzalloc(struct_size(ictl, outputs, of_irq_count(node)),
+		       GFP_KERNEL);
 	if (!ictl)
 		return -ENOMEM;
 
@@ -470,36 +408,23 @@ static int __init rtl819x_ictl_of_init(struct device_node *node,
 		goto err_free;
 	}
 
-	/* Mask everything before touching the routing */
+	/* Mask everything and disconnect every input before serving DT */
 	for (bank = 0; bank < data->num_banks; bank++)
 		writel(0, bank_reg(ictl, bank,
 				   bank ? RTL819X_GIMR2 : RTL819X_GIMR));
-
-	rtl819x_ictl_setup_routing(ictl);
-	rtl819x_ictl_setup_line_masks(ictl);
+	rtl819x_ictl_clear_routing(ictl);
 
 	/* Keep the bank 1 aggregator enabled permanently */
 	if (data->num_banks > 1)
 		writel(BIT(RTL819X_AGGREGATOR_INPUT),
 		       bank_reg(ictl, 0, RTL819X_GIMR));
 
-	ictl->domain = irq_domain_create_linear(of_fwnode_handle(node),
-						data->num_inputs,
-						&rtl819x_ictl_domain_ops, ictl);
-	if (!ictl->domain) {
-		pr_err("%pOF: unable to add IRQ domain\n", node);
-		ret = -ENOMEM;
-		goto err_unmap;
-	}
-
 	ret = rtl819x_ictl_setup_parents(node, ictl);
 	if (ret)
-		goto err_domain;
+		goto err_unmap;
 
 	return 0;
 
-err_domain:
-	irq_domain_remove(ictl->domain);
 err_unmap:
 	iounmap(ictl->base);
 err_free:
@@ -509,8 +434,8 @@ err_free:
 /*
  * Reserved for future members of the RTL819x family (e.g. the single-bank,
  * 32-input RTL8196E, RTL8197D and RTL8881A); their compatibles can be added
- * to rtl819x_ictl_of_match with per-SoC geometry once their routing tables
- * and input maps are handled.
+ * to rtl819x_ictl_of_match with per-SoC geometry once their input maps are
+ * handled.
  */
 IRQCHIP_DECLARE(realtek_rtl819x_intc, "realtek,rtl8197f-intc",
 		rtl819x_ictl_of_init);

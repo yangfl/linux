@@ -18,11 +18,11 @@ description: |
   is therefore reserved and not usable as a regular interrupt.
 
   Eight routing registers (IRR0-IRR7) assign each input to one of the six
-  MIPS CPU interrupt lines IP2-IP7.  The driver currently programs the
-  vendor default routing, so the node must list one parent interrupt for
-  every CPU line that routed inputs land on: on the RTL8197F these are
-  IP2 (generic sources), IP4 (switch core), IP5 (PCIe), IP6 (WLAN MAC) and
-  IP7 (CPU SI timer).
+  MIPS CPU interrupt lines IP2-IP7; the routing of an input is selected by
+  the second cell of its interrupt specifier.  The node must list one
+  parent interrupt for every CPU line that routed inputs land on: on the
+  RTL8197F these are IP2 (generic sources), IP4 (switch core), IP5 (PCIe),
+  IP6 (WLAN MAC) and IP7 (CPU SI timer).
 
 allOf:
   - $ref: /schemas/interrupt-controller.yaml#
@@ -42,16 +42,17 @@ properties:
   "#interrupt-cells":
     const: 2
     description: |
-      The first cell is the interrupt number (0-63, input 31 reserved).
-      The second cell encodes the trigger type as standard IRQ_TYPE_*
-      flags; all inputs are level-high, so 4 (IRQ_TYPE_LEVEL_HIGH) must
-      be used.
+      The first cell is the interrupt input number (0-63, input 31
+      reserved).  The second cell is the index of the parent interrupt in
+      "interrupts" whose CPU line the input is wired to; inputs are
+      level-high, no trigger-type configuration is provided.
 
   interrupts:
     minItems: 1
     maxItems: 5
     description:
-      The MIPS CPU interrupt lines this controller feeds, see above.
+      The MIPS CPU interrupt lines this controller feeds, in the order
+      referenced by the second cell of the interrupt specifiers.
 
 required:
   - compatible
@@ -75,5 +76,5 @@ examples:
 
     device {
         interrupt-parent = <&rtl8197f_intc>;
-        interrupts = <9 4>; /* UART0 */
+        interrupts = <9 0>; /* UART0, routed to the first parent (IP2) */
     };

@@ -85,6 +85,13 @@
 			#interrupt-cells = <2>;
 
 			interrupt-parent = <&cpuintc>;
+			/*
+			 * Interrupt specifiers are <input output>: generic
+			 * sources (TIMER0, UART0, USB, both GPIO banks) use
+			 * the first parent (IP2); the switch core, PCIe
+			 * root port, WLAN MAC and CPU SI timer are wired to
+			 * the dedicated lines (IP4, IP5, IP6, IP7).
+			 */
 			interrupts = <2>, <4>, <5>, <6>, <7>;
 		};
 
@@ -95,7 +102,7 @@
 			clock-frequency = <100000000>;
 
 			interrupt-parent = <&intc>;
-			interrupts = <9 4>;
+			interrupts = <9 0>;
 
 			status = "disabled";
 		};
@@ -109,7 +116,7 @@
 			#interrupt-cells = <2>;
 
 			interrupt-parent = <&intc>;
-			interrupts = <16 4>;
+			interrupts = <16 0>;
 
 			status = "disabled";
 		};
@@ -123,7 +130,7 @@
 			#interrupt-cells = <2>;
 
 			interrupt-parent = <&intc>;
-			interrupts = <17 4>;
+			interrupts = <17 0>;
 
 			status = "disabled";
 		};
@@ -136,7 +143,7 @@
 			 * it back (see the timer binding).
 			 */
 			reg = <0x3100 0x20>;
-			interrupts = <7 4>;
+			interrupts = <7 0>;
 			interrupt-parent = <&intc>;
 			clocks = <&lxclk>;
 
@@ -168,7 +175,7 @@
 			compatible = "generic-ohci";
 			reg = <0x20000 0x1000>;
 			interrupt-parent = <&intc>;
-			interrupts = <13 4>;
+			interrupts = <13 0>;
 			phys = <&usbphy 0>, <&usbphy 1>;
 			big-endian-desc;
 
@@ -179,7 +186,7 @@
 			compatible = "generic-ehci";
 			reg = <0x21000 0x1000>;
 			interrupt-parent = <&intc>;
-			interrupts = <13 4>;
+			interrupts = <13 0>;
 			phys = <&usbphy 0>, <&usbphy 1>;
 			big-endian-desc;
 
@@ -191,7 +198,7 @@
 			reg = <0x10000 0x100>;
 			reg-names = "nic";
 			interrupt-parent = <&intc>;
-			interrupts = <15 4>;
+			interrupts = <15 1>;
 
 			status = "disabled";
 		};
@@ -264,12 +271,12 @@
 		 * cannot be requested directly.
 		 */
 		interrupt-parent = <&intc>;
-		interrupts = <21 4>;
+		interrupts = <21 2>;
 		interrupt-map-mask = <0 0 0 7>;
-		interrupt-map = <0 0 0 1 &intc 21 4>,
-				<0 0 0 2 &intc 21 4>,
-				<0 0 0 3 &intc 21 4>,
-				<0 0 0 4 &intc 21 4>;
+		interrupt-map = <0 0 0 1 &intc 21 2>,
+				<0 0 0 2 &intc 21 2>,
+				<0 0 0 3 &intc 21 2>,
+				<0 0 0 4 &intc 21 2>;
 
 		status = "disabled";
 	};
