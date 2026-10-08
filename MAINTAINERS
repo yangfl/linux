@@ -23025,6 +23025,13 @@ F:	drivers/spi/spi-realtek-rtl819x.c
 F:	drivers/watchdog/realtek_rtl819x_wdt.c
 F:	include/dt-bindings/clock/realtek-rtl819x-clks.h
 
+REALTEK RTL8192F-SoC WIRELESS DRIVER
+M:	David Yang <mmyangfl@gmail.com>
+L:	linux-wireless@vger.kernel.org
+S:	Supported
+F:	Documentation/devicetree/bindings/net/wireless/realtek,rtl8197f-wifi.yaml
+F:	drivers/net/wireless/realtek/rtl8192f-soc/
+
 REALTEK RTL83xx SMI DSA ROUTER CHIPS
 M:	Linus Walleij <linusw@kernel.org>
 M:	Luiz Angelo Daros de Luca <luizluca@gmail.com>
