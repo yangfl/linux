@@ -201,6 +201,38 @@
 				label = "config";
 				reg = <0x20000 0x10000>;
 				read-only;
+
+				/* The factory MIB: ASCII "H601" at offset 0, a
+				 * big-endian length at 4, then the board
+				 * settings: the two Ethernet addresses at 0x7
+				 * and 0xd, then one record per wireless
+				 * interface starting at 0x13, each holding 8
+				 * addresses, the per-channel TX power levels
+				 * and the board options.  Same layout the
+				 * vendor userspace decodes: struct
+				 * hw_setting is boardVer, nic0Addr, nic1Addr
+				 * and then hw_wlan_setting records, read at
+				 * HW_SETTING_ETHMAC_OFFSET 1 and
+				 * HW_WLAN_SETTING_OFFSET 13, both relative to
+				 * that 6-byte header.
+				 *
+				 * The interface's own record is taken whole
+				 * and indexed by the driver, so only its
+				 * start and length are ABI here.  163 bytes
+				 * is the part this core reads: 48 bytes of
+				 * addresses, seven 14-entry per-channel power
+				 * arrays and the 17 board-option bytes
+				 * (regulatory domain, RFE type, crystal
+				 * trim, thermal tracking flag).  The record
+				 * at 0x668 belongs to the PCIe 5 GHz radio.
+				 */
+				compatible = "nvmem-cells";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				efuse_config_13: efuse@13 {
+					reg = <0x13 0xa3>;
+				};
 			};
 
 			/* Winbond w25q128 (16 MiB). */
@@ -238,9 +270,13 @@
 &wifi {
 	status = "okay";
 
-	/* No MAC address property: the factory one lives in the "config"
-	 * MIB partition of the SPI NOR (this SoC's efuse reads blank), so it
-	 * needs an nvmem cell once that partition has a driver.  Without it
-	 * the driver warns and falls back to a random local address.
+	/* The board's factory record from the "config" MIB partition (this
+	 * SoC's on-die efuse reads blank): its first field is the address
+	 * wlan0 runs with, the rest are the per-channel TX power levels.
+	 * Without it the driver warns and falls back to a random locally
+	 * administered address, and every rate is driven from the vendor's
+	 * default level instead of this unit's calibrated one.
 	 */
+	nvmem-cells = <&efuse_config_13>;
+	nvmem-cell-names = "efuse";
 };
