@@ -145,6 +145,8 @@ static int rtl8192f_start(struct ieee80211_hw *hw)
 		rtl8192f_set_channel(priv, priv->cur_channel,
 				     priv->cur_chan_type);
 
+	rtl8192f_dig_start(priv);
+
 	ieee80211_wake_queues(hw);
 
 	rtl8192f_tx_watch_start(priv);
@@ -161,6 +163,7 @@ static void rtl8192f_stop(struct ieee80211_hw *hw, bool suspend)
 	mutex_lock(&priv->conf_mutex);
 
 	rtl8192f_tx_watch_stop(priv);
+	rtl8192f_dig_stop(priv);
 
 	ieee80211_stop_queues(hw);
 	rtl8192f_write16(priv, REG_CR,
@@ -788,6 +791,7 @@ static int rtl8192f_soc_probe(struct platform_device *pdev)
 	mutex_init(&priv->h2c_mutex);
 	mutex_init(&priv->conf_mutex);
 	INIT_DELAYED_WORK(&priv->tx_watch, rtl8192f_tx_watch);
+	INIT_DELAYED_WORK(&priv->dig_work, rtl8192f_dig_work);
 
 	priv->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(priv->regs)) {

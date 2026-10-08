@@ -849,6 +849,8 @@ struct rtl8192f_soc_priv {
 	bool running;
 	u32 cur_channel;
 	enum nl80211_channel_type cur_chan_type;
+	u8 dig_igi;
+	struct delayed_work dig_work;
 
 	/* interface state (single-vif for now) */
 	struct ieee80211_vif *vif;
@@ -1024,7 +1026,42 @@ void rtl8192f_bss_info_changed(struct ieee80211_hw *hw,
  */
 
 int rtl8192f_hw_power_on(struct rtl8192f_soc_priv *priv);
+/* Dynamic initial gain (DIG).  The 8197F executes phydm's 11N branch, so the
+ * counters and the hold/reset bits are the 11N set: addresses from
+ * phydm_regdefine11n.h 101-183, the read bin layout from phydm_dig.c
+ * 2700-2753 and the hold/reset order from phydm_dig.c 2959-3030.
+ */
+#define REG_FA_CCK_CTRL			0x0A2C	/* CCK FA/CCA hold + reset */
+#define REG_FA_CCK_HIGH			0x0A58	/* CCK FA counter, bits 15:8 */
+#define REG_FA_CCK_LOW			0x0A5C	/* CCK FA counter, bits 7:0 */
+#define REG_FA_OFDM_HOLD		0x0C00	/* page C hold, bit31 */
+#define REG_FA_OFDM_RESET		0x0C0C	/* page C reset, bit31 */
+#define REG_INITIAL_GAIN		0x0C50	/* byte0 = initial gain code */
+#define REG_FA_OFDM_SYNC		0x0CF0	/* fast sync / server board search */
+#define REG_FA_OFDM_RESET2		0x0D00	/* page D hold bit31, reset bit27 */
+#define REG_FA_OFDM_CCA			0x0DA0	/* OFDM CCA (low) / parity fail */
+#define REG_FA_OFDM_HDR			0x0DA4	/* rate illegal / crc8 fail */
+#define REG_FA_OFDM_MCS			0x0DA8	/* mcs fail (low half) */
+
+/* Bounds and ladder for this radio as the vendor sets them: 1T1R takes
+ * DM_DIG_MAX_AP-6 = 0x38 (phydm_dig.c 1083-1086), the 8197F lower bound is
+ * 0x1e (phydm_dig.c 1090-1091), the AP-side FA thresholds are 0x100/0x200/0x300
+ * (phydm_dig.c 116-118) and the step triple is 2/1/2 (phydm_dig.c 931-934).
+ */
+#define DIG_IGI_MAX			0x38
+#define DIG_IGI_MIN			0x1e
+#define DIG_FA_STEP_HIGH		2
+#define DIG_FA_STEP_MID			1
+#define DIG_FA_STEP_LOW			2
+#define DIG_FA_TH_LOW			0x100
+#define DIG_FA_TH_MID			0x200
+#define DIG_FA_TH_HIGH			0x300
+#define DIG_PERIOD_MS			2000
+
 int rtl8192f_hw_init(struct rtl8192f_soc_priv *priv);
+void rtl8192f_dig_work(struct work_struct *work);
+void rtl8192f_dig_start(struct rtl8192f_soc_priv *priv);
+void rtl8192f_dig_stop(struct rtl8192f_soc_priv *priv);
 int rtl8192f_hw_fifo_init(struct rtl8192f_soc_priv *priv);
 int rtl8192f_fw_download(struct rtl8192f_soc_priv *priv);
 int rtl8192f_h2c_send(struct rtl8192f_soc_priv *priv, u8 id,

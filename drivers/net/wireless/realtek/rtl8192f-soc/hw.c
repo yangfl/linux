@@ -878,6 +878,120 @@ int rtl8192f_hw_init(struct rtl8192f_soc_priv *priv)
 /* TX power                                                            */
 
 /* ------------------------------------------------------------------ */
+/* Dynamic initial gain                                                */
+/* ------------------------------------------------------------------ */
+/* Count the false alarms of one period.  The vendor holds both counter pages
+ * and the CCK counters before reading, then pulses the resets and drops the
+ * holds (phydm_dig.c 2959-3030); without that the next period would report a
+ * running total instead of its own.  The OFDM bins are the six the vendor
+ * sums into Cnt_Ofdm_fail - the low half of 0xda0 is a busy-channel count and
+ * stays out of it (phydm_dig.c 2715-2718) - and the CCK side is the 16-bit FA
+ * counter split across 0xa5c (low byte) and 0xa58 (high byte), assembled as at
+ * phydm_dig.c 2747-2753.
+ */
+static u32 rtl8192f_dig_fa_count(struct rtl8192f_soc_priv *priv)
+{
+	u32 val, ofdm, cck;
+
+	rtl8192f_rmw_bb(priv, REG_FA_OFDM_HOLD, BIT(31), BIT(31));
+	rtl8192f_rmw_bb(priv, REG_FA_OFDM_RESET2, BIT(31), BIT(31));
+	rtl8192f_rmw_bb(priv, REG_FA_CCK_CTRL, BIT(12), BIT(12));
+	rtl8192f_rmw_bb(priv, REG_FA_CCK_CTRL, BIT(14), BIT(14));
+
+	val = rtl8192f_read32(priv, REG_FA_OFDM_SYNC);
+	ofdm = FIELD_GET(GENMASK(15, 0), val) + FIELD_GET(GENMASK(31, 16), val);
+
+	val = rtl8192f_read32(priv, REG_FA_OFDM_CCA);
+	ofdm += FIELD_GET(GENMASK(31, 16), val);
+
+	val = rtl8192f_read32(priv, REG_FA_OFDM_HDR);
+	ofdm += FIELD_GET(GENMASK(15, 0), val) + FIELD_GET(GENMASK(31, 16), val);
+
+	val = rtl8192f_read32(priv, REG_FA_OFDM_MCS);
+	ofdm += FIELD_GET(GENMASK(15, 0), val);
+
+	cck = FIELD_GET(GENMASK(7, 0), rtl8192f_read32(priv, REG_FA_CCK_LOW)) +
+	      (FIELD_GET(GENMASK(31, 24), rtl8192f_read32(priv, REG_FA_CCK_HIGH))
+	       << 8);
+
+	rtl8192f_rmw_bb(priv, REG_FA_OFDM_RESET, BIT(31), BIT(31));
+	rtl8192f_rmw_bb(priv, REG_FA_OFDM_RESET, BIT(31), 0);
+	rtl8192f_rmw_bb(priv, REG_FA_OFDM_RESET2, BIT(27), BIT(27));
+	rtl8192f_rmw_bb(priv, REG_FA_OFDM_RESET2, BIT(27), 0);
+	rtl8192f_rmw_bb(priv, REG_FA_OFDM_HOLD, BIT(31), 0);
+	rtl8192f_rmw_bb(priv, REG_FA_OFDM_RESET2, BIT(31), 0);
+	rtl8192f_rmw_bb(priv, REG_FA_CCK_CTRL, BIT(13) | BIT(12), 0);
+	rtl8192f_rmw_bb(priv, REG_FA_CCK_CTRL, BIT(13) | BIT(12), BIT(13));
+	rtl8192f_rmw_bb(priv, REG_FA_CCK_CTRL, BIT(15) | BIT(14), 0);
+	rtl8192f_rmw_bb(priv, REG_FA_CCK_CTRL, BIT(15) | BIT(14), BIT(15));
+
+	return ofdm + cck;
+}
+
+/* One DIG step: trade the initial gain against the measured false-alarm
+ * rate.  Above the middle threshold the gain code goes up, below the low
+ * threshold it comes back down, and the code stays inside the vendor's
+ * 1T1R 2.4G window.  The direction of the arithmetic is the SDK's
+ * (phydm_dig.c 2598-2605), not a re-derivation: 0xc50 counts the other
+ * way from what the name suggests, and the shipped radio is the
+ * reference for which way is "less sensitive".
+ *
+ * Left out on purpose, because each needs state this host path does not
+ * have: the RSSI-driven narrowing of the bounds, the TDMA dual-gain
+ * machine, the CCK packet-detect/CS-ratio ladder (0xa08[19:16],
+ * 0xaa8[20:16]) and the AGC table switching.  Their absence is why a
+ * quiet channel still sits at the initial value: only the false-alarm
+ * term drives the loop here.
+ */
+void rtl8192f_dig_work(struct work_struct *work)
+{
+	struct rtl8192f_soc_priv *priv =
+		container_of(to_delayed_work(work), struct rtl8192f_soc_priv,
+			     dig_work);
+	u32 fa;
+	u8 igi;
+
+	if (!priv->hw_ready)
+		return;
+
+	fa = rtl8192f_dig_fa_count(priv);
+	igi = priv->dig_igi;
+
+	if (fa > DIG_FA_TH_HIGH)
+		igi += DIG_FA_STEP_HIGH;
+	else if (fa > DIG_FA_TH_MID)
+		igi += DIG_FA_STEP_MID;
+	else if (fa < DIG_FA_TH_LOW)
+		igi -= DIG_FA_STEP_LOW;
+
+	igi = clamp_t(u8, igi, DIG_IGI_MIN, DIG_IGI_MAX);
+	if (igi != priv->dig_igi) {
+		priv->dig_igi = igi;
+		rtl8192f_rmw_bb(priv, REG_INITIAL_GAIN, 0xff, igi);
+	}
+
+	schedule_delayed_work(&priv->dig_work,
+			      msecs_to_jiffies(DIG_PERIOD_MS));
+}
+
+/* Seed the state from the value the BB init table left in 0xc50 - the same
+ * place the vendor's DIG initialisation reads - and clear the counters so the
+ * first sample covers one period only.
+ */
+void rtl8192f_dig_start(struct rtl8192f_soc_priv *priv)
+{
+	priv->dig_igi = rtl8192f_read32(priv, REG_INITIAL_GAIN) & 0xff;
+	rtl8192f_dig_fa_count(priv);
+	schedule_delayed_work(&priv->dig_work,
+			      msecs_to_jiffies(DIG_PERIOD_MS));
+}
+
+void rtl8192f_dig_stop(struct rtl8192f_soc_priv *priv)
+{
+	cancel_delayed_work_sync(&priv->dig_work);
+}
+
+/* ------------------------------------------------------------------ */
 /* Channel switching                                                   */
 /* ------------------------------------------------------------------ */
 
