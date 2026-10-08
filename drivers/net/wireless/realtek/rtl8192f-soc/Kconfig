@@ -1,0 +1,12 @@
+config RTL8192F_SOC
+	tristate "Realtek RTL8192F-SoC (RTL8197F integrated) wireless support"
+	depends on MAC80211
+	depends on MIPS || COMPILE_TEST
+	help
+	  This adds support for the 802.11bgn 1T1R WiFi core integrated in
+	  the Realtek RTL8197F router SoC.  The core is a member of the
+	  RTL8192F (gen-2.5) family wired directly to the SoC bus with a
+	  PCI-style descriptor DMA engine.
+
+	  If you choose to build it as a module, it will be called
+	  rtl8192f_soc.
