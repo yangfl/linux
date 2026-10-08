@@ -156,6 +156,17 @@
 #define REG_FWISR		0x0134
 #define FWISR_H2CCMD		BIT(4)
 #define FWISR_TRXRPT		BIT(7)
+/* Host-to-firmware mailbox: four boxes at 0x1D0 (each with a 4-byte
+ * extension at 0x1F0) and one status byte at 0x1CC.  The vendor reads bit n
+ * of the status byte as "the firmware still holds box n" and waits for it to
+ * drop before reusing the box (CheckFwReadLastH2C88XX, Hal88XXFirmware.c
+ * 2356-2370); when it never drops it clears the boxes with 0x00020101 -
+ * first the last one, then all four (FillH2CCmd88XX, Hal88XXFirmware.c
+ * 2446-2468).
+ */
+#define REG_HMETFR			0x01CC
+#define REG_HMEBOX(n)			(0x01D0 + (n) * 4)
+#define REG_HMEBOX_EXT(n)		(0x01F0 + (n) * 4)
 /* AXI bus exception cause / timestamp (8197F only, halmac_reg2.h
  * 2683-2684, bits halmac_bit2.h 32849-32885: DECERR/SLVERR R/W and
  * AXI_RXDMA_TIMEOUT).  Vendor never reads them; a non-zero value here
