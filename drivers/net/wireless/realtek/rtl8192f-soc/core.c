@@ -145,6 +145,13 @@ static int rtl8192f_start(struct ieee80211_hw *hw)
 		rtl8192f_set_channel(priv, priv->cur_channel,
 				     priv->cur_chan_type);
 
+	/* The bring-up above rewrites REG_CR, and any key this driver still
+	 * holds was installed before that, so the engine has to be switched
+	 * back on for those entries to be consulted again.
+	 */
+	if (bitmap_weight(priv->cam_map, CAM_ENTRIES))
+		rtl8192f_sec_enable(priv);
+
 	rtl8192f_dig_start(priv);
 
 	ieee80211_wake_queues(hw);
@@ -411,21 +418,6 @@ void rtl8192f_sw_scan_complete(struct ieee80211_hw *hw,
 	rtl8192f_write32(priv, REG_RCR, RTL8192F_RCR_DEFAULT);
 
 	mutex_unlock(&priv->conf_mutex);
-}
-
-int rtl8192f_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
-		     struct ieee80211_vif *vif, struct ieee80211_sta *sta,
-		     struct ieee80211_key_conf *key)
-{
-	/* No hardware crypto in this stage: return 1 so mac80211 keeps the
-	 * key in software (per mac80211 "Hardware crypto acceleration" doc,
-	 * verified in net/mac80211/key.c: ret == 1 selects the software
-	 * path without an error message).
-	 */
-	if (cmd == DISABLE_KEY)
-		return 0;
-
-	return 1;
 }
 
 /* Beacon scheduling and the ATIM TX gate (vendor HW_VAR_MAC_CONFIG, AP

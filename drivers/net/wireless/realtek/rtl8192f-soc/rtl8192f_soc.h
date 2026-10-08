@@ -406,6 +406,65 @@
 #define REG_MACID			0x0610	/* MACID[0] addr, 8B each */
 #define REG_BSSIDR			0x0618	/* BSSID, 6 bytes */
 
+/* Security CAM (HalComReg.h 1207-1211).  The entry RAM is not memory
+ * mapped: each of the 64 entries is 8 dwords and is reached one dword at
+ * a time through the write/data and read/data pair.  The command word is
+ * dword address (entry * 8 + dword) plus the polling request bit and, for
+ * a write, the write-enable bit; the polling bit stays set while the
+ * engine is busy, so it has to be observed clear before the next dword
+ * (CAMProgramEntry88XX / CAMFindUsable88XX, Hal88XXGen.c 46-98).
+ */
+#define REG_CAM_CMD			0x0670
+#define REG_CAM_WRITE			0x0674
+#define  CAM_CMD_POLLING		BIT(31)	/* BIT_SECCAM_POLLING */
+#define  CAM_CMD_WRITE_ENABLE		BIT(16)	/* BIT_SECCAM_WE */
+#define  CAM_DWORDS_PER_ENTRY		8	/* HAL_CAM_CONTENT_COUNT */
+/* HAL_CAM_CONTENT_USABLE_COUNT: two address dwords plus four key dwords. */
+#define  CAM_DWORDS_IN_USE		6
+/* total_cam_entry from 8192cd_osdep.c 3746-3749, the else branch that the
+ * 8197F takes.
+ */
+#define  CAM_ENTRIES			64
+/* Entries 0..3 stay reserved for group keys: with the engine's default-key
+ * search a multicast frame's key id indexes the entry directly (rtw88
+ * sec.c rtw_sec_get_free_cam() makes the same choice for the same reason),
+ * so pairwise keys are allocated from CAM_GROUP_ENTRIES upwards.
+ */
+#define  CAM_GROUP_ENTRIES		4
+/* DW0 low half: valid bit plus the algorithm and key id, exactly the
+ * combination CamAddOneEntry() builds (8192cd_hw.c 19245, with the
+ * algorithm passed already shifted by 2 - 8192cd_net80211.c 1064) and the
+ * same bit the vendor tests to decide whether an entry is free
+ * (CAMFindUsable88XX, Hal88XXGen.c 92-95).
+ */
+#define  CAM_CFG_VALID			BIT(15)
+#define  CAM_CFG_ALG_SHIFT		2
+#define  CAM_CFG_KEYID_MASK		0x3
+/* DOT11_ENC_ALGO (8192cd_security.h 116-124) */
+#define  CAM_ALG_NONE			0
+#define  CAM_ALG_CCMP			4
+
+/* Security engine configuration (REG_SECCFG, HalComReg.h 1211).  The
+ * vendor programs, for the hardware-crypto path, TXENC | RXDEC | NOSKMC |
+ * CHK_KEYID (CamAddOneEntry() -> HW_VAR_SECURITY_CONFIG, 8192cd_hw.c
+ * 19271-19283 with SCO_* from Wlan_TypeDef.h 40-50 mapped through
+ * HalComBit.h 18224-18230).  NOSKMC is what keeps a multicast frame from
+ * being decrypted by a CAM entry: this driver leaves group keys in
+ * software, like the vendor build does (set_gkey_to_cam = 0,
+ * 8192cd_security.c 621).
+ */
+#define REG_SECCFG			0x0680
+#define  SEC_CFG_TXENC			BIT(2)
+#define  SEC_CFG_RXDEC			BIT(3)
+#define  SEC_CFG_NOSKMC			BIT(5)
+#define  SEC_CFG_CHK_KEYID		BIT(8)
+/* REG_CR bit9, BIT_MAC_SEC_EN (HalComBit.h 8563): the MAC security engine
+ * has to be enabled for the CAM to be consulted at all;
+ * CAMProgramEntry88XX sets it as part of installing an entry
+ * (Hal88XXGen.c 229-232).
+ */
+#define  CR_MAC_SEC_EN			BIT(9)
+
 /* MACID Setting area / BSSIDR / RRSR / SLOT_TIME provenance:
  * vendor 8192c_reg.h (RTL8197_3411D_2 rtl8192cd).
  */
@@ -881,6 +940,22 @@ struct rtl8192f_soc_priv {
 	 */
 	u8 pd_threshold;
 
+	/* Security CAM bookkeeping (sec.c): which entries this driver holds.
+	 * The hardware cannot tell an entry of ours from one left by an
+	 * earlier boot, and a re-key only reaches the driver again when the
+	 * old key is deleted, so the allocation map has to live here.
+	 */
+	DECLARE_BITMAP(cam_map, CAM_ENTRIES);
+	/* Which key owns each CAM entry.  mac80211 hands the very same
+	 * ieee80211_key_conf back to set_key after a hardware restart
+	 * (ieee80211_reconfig() -> ieee80211_reenable_keys() ->
+	 * drv_set_key, net/mac80211/util.c:2264, net/mac80211/key.c:974)
+	 * without disabling it first, so the driver has to recognise its own
+	 * slot again; hw_key_idx cannot carry that on its own, because once
+	 * this key's slot was freed it can already belong to another key.
+	 */
+	struct ieee80211_key_conf *cam_owner[CAM_ENTRIES];
+
 	/* interface state (single-vif for now) */
 	struct ieee80211_vif *vif;
 	bool scanning;
@@ -1035,9 +1110,15 @@ void rtl8192f_sw_scan_start(struct ieee80211_hw *hw,
 			    struct ieee80211_vif *vif, const u8 *mac_addr);
 void rtl8192f_sw_scan_complete(struct ieee80211_hw *hw,
 			       struct ieee80211_vif *vif);
+/* sec.c: the hardware security CAM, reached only through the indirect
+ * command/data pair.  rtl8192f_sec_enable() also switches the engine on in
+ * REG_CR / REG_SECCFG, because the bring-up tables leave both at their
+ * reset values and .start() re-runs them after any key was installed.
+ */
 int rtl8192f_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 		     struct ieee80211_vif *vif, struct ieee80211_sta *sta,
 		     struct ieee80211_key_conf *key);
+void rtl8192f_sec_enable(struct rtl8192f_soc_priv *priv);
 void rtl8192f_bss_info_changed(struct ieee80211_hw *hw,
 			       struct ieee80211_vif *vif,
 			       struct ieee80211_bss_conf *info,

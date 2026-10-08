@@ -129,6 +129,13 @@ static u16 queue_to_ac(u8 qidx)
 #define TXD_W1_QSEL			GENMASK(12, 8)
 #define TXD_W1_RATE_ID			GENMASK(20, 16)
 #define TXD_W1_PKT_OFFSET		GENMASK(28, 24)
+/* TX_DW1 [23:22] names the algorithm the engine must apply (HalComTXDesc.h
+ * 117/132 TX_DW1_SECTYPE, values 522-525).  There is no key index in the
+ * descriptor: the engine finds the CAM entry from the frame's address and
+ * key id, which is why set_key() stores the peer address with the key.
+ */
+#define TXD_W1_SEC_TYPE			GENMASK(23, 22)
+#define  TXD_SEC_TYPE_AES		3
 #define TXD_W2_G_ID			GENMASK(29, 24)
 #define TXD_W2_AGG_EN			BIT(12)	/* vendor TX_DW2_AGG_EN_SH */
 #define TXD_W2_AMPDU_DENSITY		GENMASK(22, 20)
@@ -168,6 +175,13 @@ static u16 queue_to_ac(u8 qidx)
 #define RXD_W0_PKT_LEN			GENMASK(13, 0)
 #define RXD_W0_CRC32_ERR		BIT(14)
 #define RXD_W0_ICV_ERR			BIT(15)
+/* RX_DW0 [22:20] names the algorithm the engine applied and bit27 says the
+ * frame was left to software (RX_DW0_SECURITY_SH / RX_DW0_SWDEC_SH,
+ * HalComRXDesc.h 74/78).  Together they are how rtw88 rx.c 286 decides a
+ * frame arrived decrypted.
+ */
+#define RXD_W0_SECURITY			GENMASK(22, 20)
+#define RXD_W0_SWDEC			BIT(27)
 #define RXD_W0_DRV_INFO_SIZE		GENMASK(19, 16)	/* in 8B units */
 #define RXD_W0_SHIFT			GENMASK(25, 24)
 /* DW3: RX_RATE is 7 bits (0-11 legacy linear, 12+ = MCS0+); there are
@@ -737,6 +751,22 @@ void rtl8192f_txrx_stop(struct rtl8192f_soc_priv *priv)
 	priv->running = false;
 }
 
+/* Whether the security engine already took this frame apart: SWDEC says
+ * it was left for software and SECURITY names the algorithm applied
+ * (RX_DW0_SECURITY_SH / RX_DW0_SWDEC_SH, HalComRXDesc.h 74/78) - the
+ * same pair of fields rtw88 rx.c 286 tests.  CAM_ALG_NONE is the value
+ * a frame the engine did not touch reports.
+ */
+static bool rtl8192f_rx_hw_decrypted(__le32 rxdesc_w0)
+{
+	u32 w0 = le32_to_cpu(rxdesc_w0);
+
+	if (w0 & RXD_W0_SWDEC)
+		return false;
+
+	return FIELD_GET(RXD_W0_SECURITY, w0) != CAM_ALG_NONE;
+}
+
 /* ------------------------------------------------------------------ */
 /* xmit                                                                */
 /* ------------------------------------------------------------------ */
@@ -825,6 +855,14 @@ static void rtl8192f_fill_tx_desc(struct rtl8192f_soc_priv *priv,
 	 */
 	w1 |= le32_encode_bits(macid, TXD_W1_MACID);
 	w1 |= le32_encode_bits(qsel, TXD_W1_QSEL);
+	/* mac80211 leaves an hardware-key frame unencrypted and without an
+	 * IV: the engine inserts the IV, encrypts, and appends the MIC.
+	 * info->control.hw_key is only set for a key this driver accepted in
+	 * set_key(), i.e. pairwise CCMP.
+	 */
+	if (tx_info->control.hw_key &&
+	    tx_info->control.hw_key->cipher == WLAN_CIPHER_SUITE_CCMP)
+		w1 |= le32_encode_bits(TXD_SEC_TYPE_AES, TXD_W1_SEC_TYPE);
 	w1 |= le32_encode_bits(rtl8192f_ra_rate_id(sta), TXD_W1_RATE_ID);
 
 	/* W7[15:0] TXBUFF: the frame length the FIFO consumer reads
@@ -1694,13 +1732,13 @@ static void rtl8192f_rx_tasklet(struct tasklet_struct *t)
 		skb_reserve(skb, off);
 		skb_put(skb, pkt_len);
 
-		/*
-		 * The hw crypto engine is not wired up (soft crypto in
-		 * mac80211), so do NOT set RX_FLAG_DECRYPTED; the
-		 * 802.11 stack handles encryption/decryption itself.
-		 * TODO: set the flag for hw-cleared frames once
-		 * set_key() programs the hw crypto engine.
+		/* A frame the engine decrypted keeps its IV in the header,
+		 * which mac80211 parses to find the key and check the replay
+		 * counter, so only the flag tells the stack to skip software
+		 * decryption (net/mac80211/rx.c ieee80211_rx_h_decrypt()).
 		 */
+		if (rtl8192f_rx_hw_decrypted(((__le32 *)rxinfo)[0]))
+			rx_status.flag |= RX_FLAG_DECRYPTED;
 		if (!hw->conf.chandef.chan) {
 			/* No channel configured - an rx_status with
 			 * freq = 0 is rejected by mac80211.
