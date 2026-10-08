@@ -10,8 +10,10 @@
  * register at 0x18000008.  Strap bit 14 bypasses the PLL and runs the
  * CPU directly from the fixed 200 MHz LX bus clock.
  *
- * This driver only probes the reset values of those registers and
- * exports read-only clocks; it does not implement runtime rate changes.
+ * This driver probes the reset values of those registers and exports
+ * read-only clocks, plus the one thing on this SoC that is not a
+ * divider: the WLAN clock/function gate the WiFi core cannot be touched
+ * without.
  */
 
 #include <linux/clk-provider.h>
@@ -38,6 +40,26 @@
 #define RTL819X_LX_CLK_RATE			200000000
 /* SPI NOR ("Sheipa") controller clock as programmed by the bootloader */
 #define RTL819X_SPI_CLK_RATE			200000000
+
+/*
+ * Crystal oscillator select, in the same strap register: set means a
+ * 40 MHz crystal, clear means 25 MHz.  The WLAN core has to be told
+ * which one it is fed, so the rate is published as a clock.
+ */
+#define RTL819X_STRAP_XTAL_40MHZ		BIT(24)
+#define RTL819X_XTAL_25MHZ			25000000
+#define RTL819X_XTAL_40MHZ			40000000
+
+/*
+ * WLAN clock/function control.  The vendor enable sets the whole
+ * five-bit field and tests bit0 for "clock running" (8192cd_osdep.c
+ * "REG32(0xB8000064) |= 0x1F", 8192cd_util.h "if (!(REG32(0xB8000064)
+ * & BIT(0)) panic)"), so this is not a single-bit gate and gets its own
+ * clk_ops instead of clk-gate.
+ */
+#define RTL819X_REG_WLAN_CTRL			0x64
+#define RTL819X_WLAN_CTRL_EN			GENMASK(4, 0)
+#define RTL819X_WLAN_CTRL_STAT			BIT(0)
 
 /*
  * CPU PLL output frequencies (MHz) indexed by strap bits 15..18,
@@ -113,12 +135,77 @@ static struct clk_hw *rtl819x_register_pll(struct device *dev,
 	return &pll->hw;
 }
 
+struct rtl819x_wlan_hw {
+	struct clk_hw hw;
+	void __iomem *base;
+};
+
+static inline struct rtl819x_wlan_hw *to_rtl819x_wlan_hw(struct clk_hw *hw)
+{
+	return container_of(hw, struct rtl819x_wlan_hw, hw);
+}
+
+static int rtl819x_wlan_enable(struct clk_hw *hw)
+{
+	struct rtl819x_wlan_hw *wlan = to_rtl819x_wlan_hw(hw);
+
+	writel(readl(wlan->base + RTL819X_REG_WLAN_CTRL) |
+	       RTL819X_WLAN_CTRL_EN, wlan->base + RTL819X_REG_WLAN_CTRL);
+	return 0;
+}
+
+static void rtl819x_wlan_disable(struct clk_hw *hw)
+{
+	struct rtl819x_wlan_hw *wlan = to_rtl819x_wlan_hw(hw);
+
+	writel(0, wlan->base + RTL819X_REG_WLAN_CTRL);
+}
+
+static int rtl819x_wlan_is_enabled(struct clk_hw *hw)
+{
+	struct rtl819x_wlan_hw *wlan = to_rtl819x_wlan_hw(hw);
+
+	return readl(wlan->base + RTL819X_REG_WLAN_CTRL) &
+	       RTL819X_WLAN_CTRL_STAT;
+}
+
+static const struct clk_ops rtl819x_wlan_ops = {
+	.enable = rtl819x_wlan_enable,
+	.disable = rtl819x_wlan_disable,
+	.is_enabled = rtl819x_wlan_is_enabled,
+};
+
+static struct clk_hw *rtl819x_register_wlan_gate(struct device *dev,
+						 void __iomem *base,
+						 const char *name)
+{
+	struct rtl819x_wlan_hw *wlan;
+	struct clk_init_data init = {};
+
+	wlan = devm_kzalloc(dev, sizeof(*wlan), GFP_KERNEL);
+	if (!wlan)
+		return ERR_PTR(-ENOMEM);
+
+	init.name = name;
+	init.ops = &rtl819x_wlan_ops;
+	init.num_parents = 0;
+
+	wlan->base = base;
+	wlan->hw.init = &init;
+
+	if (devm_clk_hw_register(dev, &wlan->hw))
+		return ERR_PTR(-EINVAL);
+	return &wlan->hw;
+}
+
 static int rtl819x_clk_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct clk_hw_onecell_data *clk_data;
 	struct clk_hw *lx_hw, *uart_hw, *spi_hw;
 	struct clk_hw *pll_hw, *cpu_div_hw, *cpu_hw;
+	struct clk_hw *wlan_hw, *xtal_hw;
+	unsigned long xtal_rate;
 	static const char *const cpu_parents[] = { "cpu_div", "lx" };
 	static const char *cpu_div_parent = "pll";
 	void __iomem *base;
@@ -127,6 +214,19 @@ static int rtl819x_clk_probe(struct platform_device *pdev)
 	base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(base))
 		return PTR_ERR(base);
+
+	/* Crystal rate, straight off the strap; the WLAN core needs it */
+	xtal_rate = readl(base + RTL819X_REG_HW_STRAP) & RTL819X_STRAP_XTAL_40MHZ ?
+		    RTL819X_XTAL_40MHZ : RTL819X_XTAL_25MHZ;
+	xtal_hw = devm_clk_hw_register_fixed_rate(dev, "wifi_ref", NULL, 0,
+						  xtal_rate);
+	if (IS_ERR(xtal_hw))
+		return PTR_ERR(xtal_hw);
+
+	/* WLAN clock/function gate; without it the core registers read 0 */
+	wlan_hw = rtl819x_register_wlan_gate(dev, base, "wlan");
+	if (IS_ERR(wlan_hw))
+		return PTR_ERR(wlan_hw);
 
 	/* Fixed LX bus clock: no runtime programmable divider was found */
 	lx_hw = devm_clk_hw_register_fixed_rate(dev, "lx", NULL, 0,
@@ -179,6 +279,8 @@ static int rtl819x_clk_probe(struct platform_device *pdev)
 	clk_data->hws[RTL8197F_CLK_LX] = lx_hw;
 	clk_data->hws[RTL8197F_CLK_UART] = uart_hw;
 	clk_data->hws[RTL8197F_CLK_SPI] = spi_hw;
+	clk_data->hws[RTL8197F_CLK_WLAN] = wlan_hw;
+	clk_data->hws[RTL8197F_CLK_WIFI_REF] = xtal_hw;
 
 	ret = devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get,
 					  clk_data);
