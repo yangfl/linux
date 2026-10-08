@@ -406,6 +406,21 @@
 #define REG_MACID			0x0610	/* MACID[0] addr, 8B each */
 #define REG_BSSIDR			0x0618	/* BSSID, 6 bytes */
 
+/* Multi-BSSID address CAM (HalComReg.h 1141-1142, bits HalComBit.h
+ * 17719-17726).  One entry per extra BSSID the MAC has to recognise as its
+ * own: dword 1 carries address bytes 0..3, dword 2 bytes 4..5 with the entry
+ * index, the valid bit and the write/poll flags.  InitMBIDCAM88XX() writes
+ * dword 1 first, then dword 2 with both flags set (Hal88XXGen.c 6185-6204),
+ * and StopMBIDCAM88XX() clears an entry by writing the same command with the
+ * valid bit low and a zero address (Hal88XXGen.c 6876-6890).
+ */
+#define REG_MBIDCAM_1			0x0628
+#define REG_MBIDCAM_2			0x062C
+#define  MBIDCAM_POLL			BIT(31)
+#define  MBIDCAM_WRITE			BIT(30)
+#define  MBIDCAM_INDEX			GENMASK(28, 24)
+#define  MBIDCAM_VALID			BIT(23)
+
 /* Security CAM (HalComReg.h 1207-1211).  The entry RAM is not memory
  * mapped: each of the 64 entries is 8 dwords and is reached one dword at
  * a time through the write/data and read/data pair.  The command word is
@@ -501,6 +516,11 @@
 #define RCR_APP_FCS			BIT(31)	/* keep the FCS in the
 						 * received frame
 						 */
+/* Recognise the MBIDCAM addresses as own-BSS traffic (BIT_ENMBID,
+ * HalComBit.h 17636).  The vendor always rewrites RCR as clear-then-set so
+ * the MAC samples the CAM again (InitMBIDCAM88XX, Hal88XXGen.c 6201-6203).
+ */
+#define RCR_ENMBID			BIT(24)
 
 /* Default RX filter for all modes (hw_init, start, scan, assoc):
  * accept unicast/multicast/broadcast, keep the FCS in the frame
@@ -753,6 +773,20 @@ struct rtl8192f_tx_ring {
  */
 #define RTL8192F_NUM_MACID		32
 
+/* BSSID slots this core can hold.  The MBIDCAM index field is five bits
+ * and the vendor's clear loop covers eight; four is what this core's
+ * CAM indices and the factory configuration both provide.
+ */
+#define RTL8192F_NUM_BSSID		4
+
+/* Per-interface driver state (hw->vif_data_size): which MBIDCAM slot this
+ * BSSID's address lives in, so removing the interface can free it again.
+ */
+struct rtl8192f_vif {
+	u8 mbid;
+	bool mbid_set;
+};
+
 /* Per-peer driver state (hw->sta_data_size): the MACID slot this peer's
  * frames carry, which is also the rate-adaptation entry the firmware was
  * given for it.  It cannot live in priv: with one slot there, a second
@@ -956,8 +990,14 @@ struct rtl8192f_soc_priv {
 	 */
 	struct ieee80211_key_conf *cam_owner[CAM_ENTRIES];
 
-	/* interface state (single-vif for now) */
-	struct ieee80211_vif *vif;
+	/* Interface state.  One interface owns the beacon slot and the
+	 * REG_MACID/REG_BSSID pair - the MAC sources every frame with that
+	 * address - and any further BSS only gets an MBIDCAM entry, because
+	 * this core has a single resident beacon slot (see
+	 * RTL8192F_NUM_BCN_SLOT).
+	 */
+	struct ieee80211_vif *bss_vif;
+	DECLARE_BITMAP(bssid_map, RTL8192F_NUM_BSSID);
 	bool scanning;
 	DECLARE_BITMAP(macid_map, RTL8192F_NUM_MACID);
 

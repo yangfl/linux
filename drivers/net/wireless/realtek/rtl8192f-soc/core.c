@@ -57,6 +57,29 @@ static struct ieee80211_rate rtl8192f_rates[] = {
 	{ .bitrate = 540, .hw_value = 0x0b, },
 };
 
+/* Interface limits for this radio: AP interfaces up to the number of MBIDCAM
+ * slots the driver hands out, or a single station interface.
+ */
+static const struct ieee80211_iface_limit rtl8192f_iface_limits[] = {
+	{
+		.max = RTL8192F_NUM_BSSID,
+		.types = BIT(NL80211_IFTYPE_AP),
+	},
+	{
+		.max = 1,
+		.types = BIT(NL80211_IFTYPE_STATION),
+	},
+};
+
+static const struct ieee80211_iface_combination rtl8192f_iface_combinations[] = {
+	{
+		.limits = rtl8192f_iface_limits,
+		.n_limits = ARRAY_SIZE(rtl8192f_iface_limits),
+		.max_interfaces = RTL8192F_NUM_BSSID,
+		.num_different_channels = 1,
+	},
+};
+
 static struct ieee80211_supported_band rtl8192f_band_2g = {
 	.band		= NL80211_BAND_2GHZ,
 	.channels	= rtl8192f_channels_24g,
@@ -188,13 +211,43 @@ static u64 rtl8192f_get_tsf(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
 	return 0;
 }
 
+/* One entry of the multi-BSSID address CAM: address bytes 0..3 in the first
+ * data register, bytes 4..5 with the index and the flags in the second
+ * (InitMBIDCAM88XX, Hal88XXGen.c 6185-6204).  Clearing is the same command
+ * with the valid bit low and a zero address (StopMBIDCAM88XX, :6876-6890).
+ */
+static void rtl8192f_mbidcam_write(struct rtl8192f_soc_priv *priv, u8 index,
+				   const u8 *addr, bool valid)
+{
+	u32 cmd = MBIDCAM_POLL | MBIDCAM_WRITE |
+		  FIELD_PREP(MBIDCAM_INDEX, index);
+
+	rtl8192f_write32(priv, REG_MBIDCAM_1,
+			 valid ? get_unaligned_le32(addr) : 0);
+	rtl8192f_write32(priv, REG_MBIDCAM_2,
+			 valid ? cmd | MBIDCAM_VALID | addr[4] |
+				(addr[5] << 8) : cmd);
+}
+
+/* Make the MAC sample the address CAM again: the vendor always clears and
+ * re-sets BIT_ENMBID rather than only setting it (InitMBIDCAM88XX,
+ * Hal88XXGen.c 6201-6203).
+ */
+static void rtl8192f_mbssid_refresh(struct rtl8192f_soc_priv *priv)
+{
+	u32 rcr = rtl8192f_read32(priv, REG_RCR);
+
+	rtl8192f_write32(priv, REG_RCR, rcr & ~RCR_ENMBID);
+	rtl8192f_write32(priv, REG_RCR, rcr | RCR_ENMBID);
+}
+
 int rtl8192f_add_interface(struct ieee80211_hw *hw,
 			   struct ieee80211_vif *vif)
 {
 	struct rtl8192f_soc_priv *priv = hw->priv;
-
-	if (priv->vif)
-		return -EOPNOTSUPP;
+	struct rtl8192f_vif *rvif = (struct rtl8192f_vif *)vif->drv_priv;
+	bool extra_bss, readded;
+	u8 mbid;
 
 	switch (vif->type) {
 	case NL80211_IFTYPE_STATION:
@@ -204,16 +257,53 @@ int rtl8192f_add_interface(struct ieee80211_hw *hw,
 		return -EOPNOTSUPP;
 	}
 
-	priv->vif = vif;
+	/* A mac80211 restart re-adds every running interface without having
+	 * removed it first (net/mac80211/util.c: "in HW restart it exists already"), so this
+	 * call has to recognise the vif it already set up.  Treating that second
+	 * add as a new BSS both burns a CAM slot and - because REG_MSR,
+	 * REG_MACID and the BSSID are only written for the owning vif - leaves
+	 * the restarted interface with the bring-up defaults instead of its own
+	 * address on air.
+	 */
+	readded = rvif->mbid_set;
+	extra_bss = priv->bss_vif && priv->bss_vif != vif;
+
+	/* A second station interface would need a TSF and a beacon queue of
+	 * its own; only the additional-BSSID (AP) case is supported.
+	 */
+	if (vif->type == NL80211_IFTYPE_STATION && extra_bss)
+		return -EOPNOTSUPP;
+
+	if (readded) {
+		mbid = rvif->mbid;
+	} else if (extra_bss) {
+		/* Slot 0 belongs to the interface that owns REG_MACID and the
+		 * beacon slot.  The vendor's CAM numbering starts at 1 for the
+		 * root VAP (camIdx = vap_id + 1, InitMBIDCAM88XX), so the CAM
+		 * index is one above the slot number.
+		 */
+		mbid = find_next_zero_bit(priv->bssid_map,
+					  RTL8192F_NUM_BSSID, 1);
+		if (mbid >= RTL8192F_NUM_BSSID)
+			return -ENOSPC;
+	} else {
+		mbid = 0;
+		priv->bss_vif = vif;
+	}
+
+	set_bit(mbid, priv->bssid_map);
+	rvif->mbid = mbid;
+	rvif->mbid_set = true;
 
 	/* NETYPE (REG_CR bits[17:16], byte 0x102) - vendor InitMAC88XX
 	 * sets it to the operating mode (Hal88XXGen.c 5234); the MAC's
 	 * frame-exchange/NAV scheduler keys off it.  The 16-bit CR RMWs
 	 * in power_on/txrx_start never touch this byte.
 	 */
-	rtl8192f_write8(priv, REG_MSR,
-			vif->type == NL80211_IFTYPE_AP ?
-			MSR_AP : MSR_INFRA);
+	if (!extra_bss)
+		rtl8192f_write8(priv, REG_MSR,
+				vif->type == NL80211_IFTYPE_AP ?
+				MSR_AP : MSR_INFRA);
 
 	/* Our own address goes to REG_MACID (vendor HW_VAR_MAC_ADDR
 	 * writes CurrentAddress there) - it is the address the MAC puts
@@ -221,12 +311,13 @@ int rtl8192f_add_interface(struct ieee80211_hw *hw,
 	 * air shows frames with a TA that is not the netdev address, and
 	 * no AP ever answers.
 	 */
-	rtl8192f_set_myaddr(priv, vif->addr);
+	if (!extra_bss)
+		rtl8192f_set_myaddr(priv, vif->addr);
 
 	/* Single-BSS AP: the BSSID is our own address (vendor
 	 * HW_VAR_BSSID with hwaddr at 8192cd_hw.c:15346).
 	 */
-	if (vif->type == NL80211_IFTYPE_AP)
+	if (vif->type == NL80211_IFTYPE_AP && !extra_bss)
 		rtl8192f_set_bssid(priv, vif->addr);
 
 	/* STA bring-up, vendor form: RTL_W8(0x422, RTL_R8(0x422) ^ BIT(6))
@@ -242,6 +333,24 @@ int rtl8192f_add_interface(struct ieee80211_hw *hw,
 		rtl8192f_write8(priv, 0x422,
 				rtl8192f_read8(priv, 0x422) ^ BIT(6));
 
+	/* With a second BSSID the MAC has to recognise more than the
+	 * REG_MACID address, so every BSS of the set - the owner included, as
+	 * in the vendor's per-VAP initialisation - goes into the address CAM
+	 * and the CAM is re-sampled.  A single BSS never touches these
+	 * registers, which leaves the one-interface configuration byte for
+	 * byte what it was before multi-BSS support existed.
+	 *
+	 * The frame path cannot be confirmed from the host side: the MBIDCAM
+	 * registers are write-only in the vendor's own code - every one of its
+	 * dozen accesses to 0x62C is a write, no query exists - so an entry
+	 * cannot be read back.
+	 */
+	if (extra_bss) {
+		rtl8192f_mbidcam_write(priv, 1, priv->bss_vif->addr, true);
+		rtl8192f_mbidcam_write(priv, mbid + 1, vif->addr, true);
+		rtl8192f_mbssid_refresh(priv);
+	}
+
 	return 0;
 }
 
@@ -254,14 +363,47 @@ void rtl8192f_remove_interface(struct ieee80211_hw *hw,
 	 * re-reads the resident slot at every TBTT, so it has to be told to
 	 * stop owning it (rtl8192f_txrx_stop() does the same on an ifdown).
 	 */
+	struct rtl8192f_vif *rvif = (struct rtl8192f_vif *)vif->drv_priv;
+
+	if (rvif->mbid_set) {
+		rtl8192f_mbidcam_write(priv, rvif->mbid + 1, NULL, false);
+		clear_bit(rvif->mbid, priv->bssid_map);
+		rvif->mbid_set = false;
+	}
+
+	if (vif != priv->bss_vif) {
+		/* The remaining BSS set still has to match the CAM, and with
+		 * the last extra BSS gone the MAC goes back to matching only
+		 * REG_MACID - so BIT_ENMBID is dropped with it.
+		 */
+		if (bitmap_weight(priv->bssid_map, RTL8192F_NUM_BSSID) <= 1) {
+			rtl8192f_mbidcam_write(priv, 1, NULL, false);
+			rtl8192f_clrbits32(priv, REG_RCR, RCR_ENMBID);
+		} else {
+			rtl8192f_mbssid_refresh(priv);
+		}
+		return;
+	}
+
 	rtl8192f_beacon_upload(priv, NULL);
 
-	priv->vif = NULL;
+	priv->bss_vif = NULL;
 
 	/* Back to NO_LINK so a later interface does not inherit the
 	 * network type (vendor HW_VAR_MEDIA_STATUS on ifdown).
 	 */
 	rtl8192f_write8(priv, REG_MSR, MSR_NOLINK);
+
+	if (bitmap_weight(priv->bssid_map, RTL8192F_NUM_BSSID) > 1) {
+		/* A BSS outlived its own beacon owner; say so rather than
+		 * leaving it up with no way to be found.
+		 */
+		dev_warn(&priv->pdev->dev,
+			 "%u BSS interface(s) left without a beacon owner\n",
+			 bitmap_weight(priv->bssid_map, RTL8192F_NUM_BSSID));
+		rtl8192f_clrbits32(priv, REG_RCR, RCR_ENMBID);
+		bitmap_zero(priv->bssid_map, RTL8192F_NUM_BSSID);
+	}
 }
 
 /* Program our own (BSS) address into REG_MACID, the 6-byte TA the MAC
@@ -454,7 +596,8 @@ void rtl8192f_bss_info_changed(struct ieee80211_hw *hw,
 
 	mutex_lock(&priv->conf_mutex);
 
-	if (changed & BSS_CHANGED_BSSID && is_valid_ether_addr(info->bssid)) {
+	if (changed & BSS_CHANGED_BSSID && is_valid_ether_addr(info->bssid) &&
+	    vif == priv->bss_vif) {
 		/* vendor 8192c_reg.h BSSIDR (0x618), 6 bytes */
 		rtl8192f_write32(priv, REG_BSSIDR,
 				 info->bssid[0] | (info->bssid[1] << 8) |
@@ -497,7 +640,12 @@ void rtl8192f_bss_info_changed(struct ieee80211_hw *hw,
 	 * a divergence without a vendor counterpart.
 	 */
 
-	if (vif->type == NL80211_IFTYPE_AP) {
+	/* Only the interface that owns the resident beacon slot can put a
+	 * beacon on air: there is one slot (RTL8192F_NUM_BCN_SLOT), so an
+	 * additional BSS is served by the beacon its own template is folded
+	 * into - see the multi-BSS note in rtl8192f_soc.h.
+	 */
+	if (vif == priv->bss_vif && vif->type == NL80211_IFTYPE_AP) {
 		struct sk_buff *skb = NULL;
 		bool arm = false;
 
@@ -915,10 +1063,23 @@ static int rtl8192f_soc_probe(struct platform_device *pdev)
 	 */
 	hw->extra_tx_headroom = ALIGN(RTL8192F_TX_INFO_DESC_SIZE, 8);
 	hw->max_listen_interval = 1;
-	hw->vif_data_size = 0;
+	hw->vif_data_size = sizeof(struct rtl8192f_vif);
 	hw->sta_data_size = sizeof(struct rtl8192f_sta);
 	hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
 				     BIT(NL80211_IFTYPE_AP);
+	/* Several BSSIDs share this one radio and its single beacon slot, so
+	 * the combination is a set of AP interfaces on one channel; a station
+	 * interface takes the slot alone (see rtl8192f_add_interface()).
+	 */
+	hw->wiphy->iface_combinations = rtl8192f_iface_combinations;
+	hw->wiphy->n_iface_combinations = ARRAY_SIZE(rtl8192f_iface_combinations);
+	/* One beacon carrying several BSSIDs is the multiple-BSSID scheme this
+	 * core can do: the extra addresses go to the MBIDCAM and the MAC
+	 * recognises them as own-BSS (RCR ENMBID), while mac80211 folds the
+	 * per-BSSID profiles into the single beacon template.
+	 */
+	ieee80211_hw_set(hw, SUPPORTS_MULTI_BSSID);
+	hw->wiphy->mbssid_max_interfaces = RTL8192F_NUM_BSSID;
 
 	for (i = 0; i < NUM_NL80211_BANDS; i++)
 		if (i == NL80211_BAND_2GHZ)
