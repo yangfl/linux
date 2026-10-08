@@ -871,6 +871,7 @@ u32 rtl8192f_read_bb_reg(struct rtl8192f_soc_priv *priv, u16 addr);
 /* ------------------------------------------------------------------ */
 
 int rtl8192f_wlan_clk_enable(struct rtl8192f_soc_priv *priv);
+void rtl8192f_platform_reset(struct rtl8192f_soc_priv *priv);
 void rtl8192f_wlan_clk_disable(struct rtl8192f_soc_priv *priv);
 
 /* ------------------------------------------------------------------ */
