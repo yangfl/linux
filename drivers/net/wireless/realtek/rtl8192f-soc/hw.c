@@ -1002,6 +1002,95 @@ void rtl8192f_dig_stop(struct rtl8192f_soc_priv *priv)
 #define RTL8192F_DATA_SC_BELOW		1
 #define RTL8192F_DATA_SC_ABOVE		2
 
+/* The two receive-path helpers that config_phydm_switch_bandwidth_8197f()
+ * runs after the width writes: phydm_RxDfirParByBw_8197f()
+ * (phydm_hal_api8197f.c 198-217) and phydm_CcaParByBw_8197f() (same file
+ * 29-186).  They are bandwidth-dependent, so a 40 MHz switch that stops
+ * at the width registers leaves the receive filter and the CCA threshold
+ * configured for 20 MHz.
+ *
+ * Only the RFEType 0 branch of the CCA helper is ported: this core's
+ * board record says RFEType = 0, and the other branches key off
+ * external PA/LNA variants this core does not have.  Inside that branch
+ * the vendor tests RXAntStatus with two arms that write the same value,
+ * so the test is not ported either.  The cut detected at init is B
+ * (rtl8192f_hw_init()), so the A-cut arm, which never touches 0xaa8,
+ * does not apply here.
+ *
+ * The same helper also pins 0xe24[21:20] = 2 (TAP_UPD) and 0xc10[29:28]
+ * = 2 (down-sampling factor) on every switch; the BB init table already
+ * holds both fields at 2 (0x00200000 and 0x22000000), so re-writing them
+ * here would be a no-op.
+ */
+static void rtl8192f_bw_rx_path(struct rtl8192f_soc_priv *priv, bool wide)
+{
+	u32 c3c;
+
+	/* RX DFIR tap set: bit8 selects the BW20/BW10/BW5 bank with the
+	 * coefficient 0xa3 in byte0, the 40 MHz bank is bit8 clear with 0x3.
+	 */
+	rtl8192f_rmw_bb(priv, REG_RX_DFIR_MOD, BIT(8), wide ? 0 : BIT(8));
+	rtl8192f_rmw_bb(priv, REG_RX_DFIR_MOD, GENMASK(7, 0),
+			wide ? 0x3 : 0xa3);
+
+	/* Energy-detect CCA threshold for the width actually in use:
+	 * 0xaa8[20:16] = 0xf at 20 MHz, 0x12 at 40 MHz.
+	 */
+	rtl8192f_rmw_bb(priv, REG_EDCCA_LEVEL, GENMASK(20, 16),
+			wide ? FIELD_PREP(GENMASK(20, 16), 0x12) :
+			       FIELD_PREP(GENMASK(20, 16), 0xf));
+
+	/* 0xc3c: rebuild bits[8:3] the way the vendor branch does - keep
+	 * bits[8:6], drop bits[5:3] and set bit4 (both bandwidth arms write
+	 * the same 2 << 3 here).
+	 */
+	c3c = rtl8192f_read_bb_reg(priv, REG_CCA_CTRL);
+	rtl8192f_rmw_bb(priv, REG_CCA_CTRL, GENMASK(8, 3),
+			(c3c & GENMASK(8, 6)) | BIT(4));
+}
+
+/* Primary-CCA side select: phydm_api_primary_cca() (phydm_rtl8197f.c
+ * 185-215), which SwChnl() runs at the end of every channel switch on
+ * this chip - 1 when the extension channel is above the primary, 2
+ * below, 0 at 20 MHz (8192cd_hw.c 7570-7586).  The same call parks the
+ * PD threshold: naming a single side band clears 0xc84[31:28], and the
+ * saved value only comes back when the select returns to the both-halves
+ * setting.
+ *
+ * Both fields sit at their BB-table values unless something writes them:
+ * 0xc6c = 0x35 (select 0) and 0xc84 = 0x32000000 (threshold 3).  That
+ * is the 20 MHz configuration, and a core left in it while the rest of
+ * the PHY is in 40 MHz mode asserts no carrier detect at all, so the AP
+ * receives nothing.
+ */
+static void rtl8192f_bw_primary_cca(struct rtl8192f_soc_priv *priv,
+				    enum nl80211_channel_type chan_type)
+{
+	u32 sel = FIELD_GET(PRIMARY_CCA_SEL,
+			    rtl8192f_read_bb_reg(priv, REG_PRIMARY_CCA));
+	u32 next = PRIMARY_CCA_DSC;
+
+	if (chan_type == NL80211_CHAN_HT40MINUS)
+		next = PRIMARY_CCA_USC;
+	else if (chan_type == NL80211_CHAN_HT40PLUS)
+		next = PRIMARY_CCA_LSC;
+
+	if (sel == PRIMARY_CCA_DSC || sel == 3) {
+		u32 pd = rtl8192f_read_bb_reg(priv, REG_PD_THRESHOLD);
+
+		priv->pd_threshold = (u8)FIELD_GET(PD_THRESHOLD, pd);
+	}
+
+	rtl8192f_rmw_bb(priv, REG_PRIMARY_CCA, PRIMARY_CCA_SEL,
+			FIELD_PREP(PRIMARY_CCA_SEL, next));
+
+	if (next == PRIMARY_CCA_DSC || next == 3)
+		rtl8192f_rmw_bb(priv, REG_PD_THRESHOLD, PD_THRESHOLD,
+				FIELD_PREP(PD_THRESHOLD, priv->pd_threshold));
+	else
+		rtl8192f_rmw_bb(priv, REG_PD_THRESHOLD, PD_THRESHOLD, 0);
+}
+
 /* Program the 20/40 MHz path.  This is SwBWMode88XX_97F()
  * (Hal8197FPhyCfg.c 78-102) plus the BB half of
  * config_phydm_switch_bandwidth_8197f() (phydm_hal_api8197f.c 889-961);
@@ -1083,6 +1172,13 @@ int rtl8192f_set_channel(struct rtl8192f_soc_priv *priv, u32 channel,
 
 	rtl8192f_phy_set_rf_reg(priv, RF_REG_MODE_AG, rf18);
 
+	/* The vendor's switch helper finishes the bandwidth change with the
+	 * receive filter and the CCA threshold for the new width, after the
+	 * RF bandwidth bit has gone out (config_phydm_switch_bandwidth_8197f()
+	 * 1020-1023).
+	 */
+	rtl8192f_bw_rx_path(priv, wide);
+
 	/* The vendor recalibrates and re-programs the PA ladder on every
 	 * channel switch, not only at bring-up: SwChnl() calls
 	 * PHY_IQCalibrate() (8192cd_hw.c 7523, 7530 - skipped only in
@@ -1093,6 +1189,11 @@ int rtl8192f_set_channel(struct rtl8192f_soc_priv *priv, u32 channel,
 	 */
 	rtl8192f_iqk(priv);
 	rtl8192f_set_tx_power(priv, channel, wide);
+
+	/* Last, as in SwChnl(): the select names the half the analyser should
+	 * be listening on once the rest of the width switch is in place.
+	 */
+	rtl8192f_bw_primary_cca(priv, chan_type);
 
 	priv->cur_channel = channel;
 	priv->cur_chan_type = chan_type;

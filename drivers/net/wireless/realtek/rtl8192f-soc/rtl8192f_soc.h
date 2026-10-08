@@ -360,7 +360,29 @@
  */
 #define REG_RF_MODE			0x0800
 #define REG_RF_MODE_PAGE9		0x0900
+#define REG_RX_DFIR_MOD			0x0948	/* ODM_REG_RX_DFIR_MOD_97F;
+						 * receive DFIR tap bank
+						 */
 #define REG_CCK_ANTDIV_PARA1		0x0A00
+#define REG_EDCCA_LEVEL			0x0AA8	/* [20:16] energy-detect CCA
+						 * threshold, literal in
+						 * phydm_CcaParByBw_8197f()
+						 */
+#define REG_CCA_CTRL			0x0C3C	/* bits[8:3] CCA setup, same
+						 * helper
+						 */
+/* Which half of a 40 MHz channel the receiver puts carrier detect on, and
+ * the PD (preamble detect) threshold that goes with it.  Neither register is
+ * named in the vendor's phydm code - phydm_api_primary_cca()
+ * (phydm_rtl8197f.c 185-215) writes both by number.
+ */
+#define REG_PRIMARY_CCA			0x0C6C	/* [8:7] side-band select */
+#define  PRIMARY_CCA_SEL		GENMASK(8, 7)
+#define  PRIMARY_CCA_DSC		0	/* both halves (default) */
+#define  PRIMARY_CCA_LSC		1	/* primary on the lower half */
+#define  PRIMARY_CCA_USC		2	/* primary on the upper half */
+#define REG_PD_THRESHOLD		0x0C84	/* [31:28] preamble detect level */
+#define  PD_THRESHOLD			GENMASK(31, 28)
 #define REG_RXCK_RFMOD			0x0BB0
 #define REG_ANTDIV_PARA1			0x0CA4
 #define REG_SMALL_BANDWIDTH		0x0CE4
@@ -851,6 +873,13 @@ struct rtl8192f_soc_priv {
 	enum nl80211_channel_type cur_chan_type;
 	u8 dig_igi;
 	struct delayed_work dig_work;
+
+	/* PD threshold saved before a 40 MHz switch cleared it, so the value
+	 * the table (or a later AGC change) installed comes back on the way to
+	 * 20 MHz - the vendor keeps the same single byte (phydm's
+	 * original_pd_threshold).
+	 */
+	u8 pd_threshold;
 
 	/* interface state (single-vif for now) */
 	struct ieee80211_vif *vif;
