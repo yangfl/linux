@@ -234,3 +234,13 @@
 		};
 	};
 };
+
+&wifi {
+	status = "okay";
+
+	/* No MAC address property: the factory one lives in the "config"
+	 * MIB partition of the SPI NOR (this SoC's efuse reads blank), so it
+	 * needs an nvmem cell once that partition has a driver.  Without it
+	 * the driver warns and falls back to a random local address.
+	 */
+};

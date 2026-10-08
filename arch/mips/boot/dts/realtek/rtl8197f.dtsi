@@ -48,16 +48,16 @@
 	};
 
 	/*
-	 * Programmable clock provider (cpu/lx/uart/spi).  Uncomment and
-	 * drop the fixed-clock placeholders above to switch to it.
-	 *
-	 * sysclk: clock-controller@0 {
-	 *   compatible = "realtek,rtl8197f-clock";
-	 *   reg = <0x18000000 0x20>;
-	 *   clocks = <&xtal>;
-	 *   #clock-cells = <1>;
-	 * };
+	 * System controller: CPU PLL/divider straps plus the WLAN
+	 * clock/function gate.  The reg range has to reach 0x64, where
+	 * that gate lives.
 	 */
+	sysclk: clock-controller@18000000 {
+		compatible = "realtek,rtl8197f-clock";
+		reg = <0x18000000 0x68>;
+		clocks = <&xtal>;
+		#clock-cells = <1>;
+	};
 
 	cpuintc: interrupt-controller {
 		compatible = "mti,cpu-interrupt-controller";
@@ -279,6 +279,19 @@
 				<0 0 0 2 &intc 21 2>,
 				<0 0 0 3 &intc 21 2>,
 				<0 0 0 4 &intc 21 2>;
+
+		status = "disabled";
+	};
+	wifi: wifi@18640000 {
+		compatible = "realtek,rtl8197f-wifi";
+		reg = <0x18640000 0x10000>;
+
+		clocks = <&sysclk RTL8197F_CLK_WLAN>,
+			 <&sysclk RTL8197F_CLK_WIFI_REF>;
+		clock-names = "core", "ref";
+
+		interrupt-parent = <&intc>;
+		interrupts = <29 4>;
 
 		status = "disabled";
 	};
