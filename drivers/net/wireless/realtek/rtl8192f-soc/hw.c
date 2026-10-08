@@ -1143,18 +1143,27 @@ static void rtl8192f_set_bandwidth(struct rtl8192f_soc_priv *priv,
 
 /* vendor phydm_hal_api8197f.c config_phydm_switch_channel_8197f():
  * RF reg 0x18 carries both band select (bits 17:18, cleared for 2.4G)
- * and the central channel number in bits 7:0; the synthesizer is fed
- * the channel number directly, there is no N-divider LUT for 2.4G.
+ * and the channel number the synthesizer is set to in bits 7:0 - the
+ * argument there is named central_ch, and 8192cd_hw.c SwChnl() feeds it
+ * get_center_channel(), which is the primary +-2 at 40 MHz.  There is no
+ * N-divider LUT for 2.4G, so the primary only says which 20 MHz half
+ * legacy frames live in; writing it to the synthesizer tunes the LO
+ * 10 MHz off the channel we are actually on.
  */
 int rtl8192f_set_channel(struct rtl8192f_soc_priv *priv, u32 channel,
 			 enum nl80211_channel_type chan_type)
 {
 	bool wide = chan_type == NL80211_CHAN_HT40PLUS ||
 		    chan_type == NL80211_CHAN_HT40MINUS;
+	u32 center = channel;
 	u32 rf18;
 
 	if (!channel || channel > 14)
 		return -EINVAL;
+
+	if (wide)
+		center = chan_type == NL80211_CHAN_HT40MINUS ? channel - 2 :
+								channel + 2;
 
 	rtl8192f_set_bandwidth(priv, chan_type);
 
@@ -1162,7 +1171,7 @@ int rtl8192f_set_channel(struct rtl8192f_soc_priv *priv, u32 channel,
 
 	/* switch to 2.4G band and program central channel */
 	rf18 &= ~(RF_MODE_AG_BAND_MASK | 0xff);
-	rf18 |= channel;
+	rf18 |= center;
 
 	/* RF bandwidth, 0x18[11:10]: both bits set for 20 MHz, only bit11
 	 * for 40 MHz (phydm_hal_api8197f.c 933, 958-960).
