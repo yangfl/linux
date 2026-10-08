@@ -10,11 +10,11 @@ maintainers:
   - David Yang <mmyangfl@gmail.com>
 
 description: |
-  The RTL8197F system clock controller multiplexes and divides the CPU
-  clock according to the hardware strap register, and feeds the LX bus
-  and on-SoC peripherals such as the UART and SPI flash controllers.
-  The driver currently only probes the strap/register values at boot
-  time and exposes read-only clocks.
+  The RTL8197F system controller holds the hardware strap register that
+  multiplexes and divides the CPU clock, the crystal-select strap bit,
+  and the WLAN clock/function gate.  The straps are read-only; the
+  WLAN gate is programmable, because the integrated WiFi core cannot be
+  accessed at all while it is closed.
 
 properties:
   compatible:
@@ -45,7 +45,8 @@ examples:
   - |
     clock-controller@18000000 {
         compatible = "realtek,rtl8197f-clock";
-        reg = <0x18000000 0x20>;
+        /* strap at 0x08, WLAN clock/function gate at 0x64 */
+        reg = <0x18000000 0x68>;
         clocks = <&xtal>;
         #clock-cells = <1>;
     };
