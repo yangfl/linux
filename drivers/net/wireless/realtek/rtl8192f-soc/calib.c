@@ -8,8 +8,12 @@
  * Simplifications vs the vendor flow (all noted inline):
  * - single IQK pass, no 3-round simularity comparison / final candidate
  * - path A only (RTL8192F-SoC is 1T1R)
- * - no DPK off/on around IQK, no DPK tracking
  * - no thermal-meter triggered re-calibration (init-time one-shot IQK)
+ * - no DPK: the vendor's predistortion runs on its own per-unit
+ *   calibration data, and enabling it from the default coefficients
+ *   silences the transmitter (measured: no beacon reaches the air with
+ *   it on).  The shipped firmware also leaves the whole 0xb00 block at
+ *   zero
  * - external PA/LNA and cut-version A branches dropped (SoC internal PA)
  * - no continuous-TX / MP-mode guards
  */

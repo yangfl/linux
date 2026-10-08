@@ -14,6 +14,7 @@
 #include <linux/etherdevice.h>
 
 #include <linux/module.h>
+#include <linux/nvmem-consumer.h>
 
 #include "rtl8192f_soc.h"
 
@@ -362,6 +363,210 @@ static void rtl8192f_rmw_bb(struct rtl8192f_soc_priv *priv, u16 addr,
 	rtl8192f_write_bb_reg(priv, addr, (reg & ~mask) | (val & mask));
 }
 
+/* Per-rate transmit power: the BB TxAGC codewords, one byte per rate,
+ * 0 being the lowest step of the PA ladder and 0x3f the highest.
+ *
+ * The vendor composes these on every channel switch - SwChnl() calls
+ * SetTxPowerLevel() (8192cd_hw.c 7461, which branches for 8197F at :5449)
+ * and that runs PHYSetOFDMTxPower88XX_N() / PHYSetCCKTxPower88XX_N() - from
+ * a per-channel level kept in the board's flash MIB plus a per-rate ramp
+ * taken from this core's power-gain (PG) table, every sum clamped by
+ * POWER_RANGE_CHECK() (8192cd_cfg.h 321).  Where the board carries no level
+ * for a channel both functions fall back to a flat default instead: 0x28
+ * for the OFDM and HT groups, 0x24 for the CCK fields (Hal88XXPhyCfg.c
+ * 4326, 4677).  The two paths are the same code with a different level, so
+ * both are implemented here and the level comes from nvmem cells.
+ *
+ * The BB init table cannot supply any of this: it carries zeros at
+ * 0xe00..0xe1c (halhwimg8197f_bb.c 5230-5235) precisely because the vendor
+ * overwrites the group at run time, so a driver that leaves the table value
+ * alone drives every frame from the bottom of the ladder.
+ */
+
+/* The PG ramp in codeword steps, high byte to low byte of each register,
+ * rebased against the reference rate of its group the way the vendor
+ * rebases the PG table after reading it back (8192cd_hw.c 13009-13035:
+ * OFDM against 54M, MCS0-7 against MCS7, MCS8-15 against MCS15, CCK against
+ * 11M).  Source: WlanHAL/Data/8197F/PHY_REG_PG_8197Fmp.txt.
+ */
+static const s8 rtl8192f_pg_ofdm[8] = {
+	2, 3, 3, 3,		/* 0xe00: 18, 12, 9, 6 Mbps */
+	0, 1, 1, 2,		/* 0xe04: 54, 48, 36, 24 Mbps */
+};
+
+static const s8 rtl8192f_pg_ht[16] = {
+	2, 3, 3, 4,		/* 0xe10: MCS3, MCS2, MCS1, MCS0 */
+	0, 1, 1, 2,		/* 0xe14: MCS7..MCS4 */
+	2, 3, 3, 4,		/* 0xe18: MCS11..MCS8 */
+	0, 1, 1, 2,		/* 0xe1c: MCS15..MCS12 */
+};
+
+/* Every CCK rate carries the same PG codeword (20), so the CCK ramp is flat
+ * and only the per-channel level moves it.
+ */
+
+#define RTL8192F_TXPWR_OFDM_DEFAULT	0x28
+#define RTL8192F_TXPWR_CCK_DEFAULT	0x24
+
+/* POWER_RANGE_CHECK() */
+static u8 rtl8192f_txpwr_clamp(int val)
+{
+	if (val > 0x3f)
+		return 0x3f;
+	if (val < 0)
+		return 0;
+	return val;
+}
+
+static u8 rtl8192f_txpwr_step(u8 level, s8 ramp)
+{
+	return rtl8192f_txpwr_clamp(level + ramp);
+}
+
+/* COUNT_SIGN_OFFSET() (8192cd_cfg.h 322): the MIB stores one signed 4-bit
+ * step per path in each byte, low nibble path A and high nibble path B, so
+ * 0x0e means -2 and 0x01 means +1.
+ */
+static u8 rtl8192f_txpwr_diff(u8 level, u8 packed, bool path_b)
+{
+	u8 oft = path_b ? packed >> 4 : packed & 0x0f;
+
+	if (oft & 0x08)
+		return rtl8192f_txpwr_clamp(level - (0x10 - oft));
+	return rtl8192f_txpwr_clamp(level + oft);
+}
+
+/* Four clamped codewords for one TXAGC register, high byte first. */
+static u32 rtl8192f_txagc(u8 level, const s8 *ramp)
+{
+	return (u32)rtl8192f_txpwr_step(level, ramp[0]) << 24 |
+	       (u32)rtl8192f_txpwr_step(level, ramp[1]) << 16 |
+	       (u32)rtl8192f_txpwr_step(level, ramp[2]) << 8 |
+	       rtl8192f_txpwr_step(level, ramp[3]);
+}
+
+/* The same codeword in all four rate slots, for a group with a flat ramp. */
+static u32 rtl8192f_txagc_flat(u8 level)
+{
+	return level * 0x01010101;
+}
+
+/* The board's factory record, taken as one block from the MIB partition in
+ * flash.  Absent or short is not an error: the composition below then runs
+ * entirely on the vendor's fallback levels.
+ */
+int rtl8192f_read_calib(struct rtl8192f_soc_priv *priv)
+{
+	struct device *dev = &priv->pdev->dev;
+	struct nvmem_cell *cell;
+	void *buf;
+	size_t len;
+
+	cell = nvmem_cell_get(dev, "efuse");
+	if (IS_ERR(cell)) {
+		if (PTR_ERR(cell) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_info(dev, "no board efuse record, using the default TX power level\n");
+		return 0;
+	}
+
+	buf = nvmem_cell_read(cell, &len);
+	nvmem_cell_put(cell);
+	if (IS_ERR(buf))
+		return 0;
+
+	if (len < RTL8192F_CAL_LEN) {
+		dev_warn(dev, "board efuse record is %zu bytes, need %d, ignoring it\n",
+			 len, RTL8192F_CAL_LEN);
+	} else {
+		memcpy(priv->calib, buf, RTL8192F_CAL_LEN);
+		priv->has_calib = true;
+	}
+	kfree(buf);
+
+	return 0;
+}
+
+static u8 rtl8192f_calib_get(const struct rtl8192f_soc_priv *priv, size_t off)
+{
+	return priv->has_calib ? priv->calib[off] : 0;
+}
+
+static void rtl8192f_set_tx_power(struct rtl8192f_soc_priv *priv, u32 channel)
+{
+	unsigned int idx = channel - 1;
+	const s8 *ofdm_ramp = rtl8192f_pg_ofdm;
+	const s8 *ht_ramp = rtl8192f_pg_ht;
+	u8 level, ofdm, ht, ht2s, cck_a, cck_b;
+
+	/* OFDM and HT share one stored level: the HT40 column of the record.
+	 * The OFDM and HT20 groups are that level shifted by their own
+	 * per-channel diff nibble, and MCS8-15 shift the HT20 result once
+	 * more (Hal88XXPhyCfg.c 4490, 4521, 4540).  This core has a single
+	 * transmitter, so only path A is programmed - MCS8-15 still mirror
+	 * the single-stream groups, as they do on the shipped AP (measured:
+	 * 0xe18 == 0xe10 and 0xe1c == 0xe14).
+	 */
+	level = rtl8192f_calib_get(priv, RTL8192F_CAL_PWR_HT40_A + idx);
+	if (!level)
+		level = RTL8192F_TXPWR_OFDM_DEFAULT;
+	ofdm = rtl8192f_txpwr_diff(level,
+				   rtl8192f_calib_get(priv,
+						      RTL8192F_CAL_DIFF_OFDM + idx),
+				   false);
+	ht = rtl8192f_txpwr_diff(level,
+				 rtl8192f_calib_get(priv,
+						    RTL8192F_CAL_DIFF_HT20 + idx),
+				 false);
+	ht2s = rtl8192f_txpwr_diff(ht,
+				   rtl8192f_calib_get(priv,
+						      RTL8192F_CAL_DIFF_HT40_2S + idx),
+				   false);
+
+	rtl8192f_write_bb_reg(priv, 0xe00, rtl8192f_txagc(ofdm, ofdm_ramp));
+	rtl8192f_write_bb_reg(priv, 0xe04, rtl8192f_txagc(ofdm, ofdm_ramp + 4));
+	rtl8192f_write_bb_reg(priv, 0xe10, rtl8192f_txagc(ht, ht_ramp));
+	rtl8192f_write_bb_reg(priv, 0xe14, rtl8192f_txagc(ht, ht_ramp + 4));
+	rtl8192f_write_bb_reg(priv, 0xe18, rtl8192f_txagc(ht2s, ht_ramp + 8));
+	rtl8192f_write_bb_reg(priv, 0xe1c, rtl8192f_txagc(ht2s, ht_ramp + 12));
+
+	/* CCK has a flat ramp, so only the two per-channel levels matter
+	 * here.  A zero entry falls back the same way it does above, but
+	 * per path: the vendor tests A and B together (Hal88XXPhyCfg.c
+	 * 4666) yet takes each level on its own.
+	 */
+	cck_a = rtl8192f_calib_get(priv, RTL8192F_CAL_PWR_CCK_A + idx);
+	if (!cck_a)
+		cck_a = RTL8192F_TXPWR_CCK_DEFAULT;
+	cck_b = rtl8192f_calib_get(priv, RTL8192F_CAL_PWR_CCK_B + idx);
+	if (!cck_b)
+		cck_b = RTL8192F_TXPWR_CCK_DEFAULT;
+
+	/* CCK 1M shares 0xe08 with the MCS32 slot (bits [15:8]); the other
+	 * fields keep whatever the BB table left there, as on the shipped
+	 * AP.  0x86c carries path A's 11/5.5/2M plus path B's 11M, and
+	 * 0x838[31:8] the rest of path B - the vendor writes both groups
+	 * unconditionally even on this single-transmitter core.
+	 */
+	rtl8192f_rmw_bb(priv, 0xe08, 0x0000ff00, cck_a << 8);
+	rtl8192f_rmw_bb(priv, 0x838, 0xffffff00,
+			rtl8192f_txagc_flat(cck_b) & 0xffffff00);
+	rtl8192f_write_bb_reg(priv, 0x86c,
+			      (rtl8192f_txagc_flat(cck_a) & 0xffffff00) |
+			      cck_b);
+
+	/* The levels written here come out of the factory (PG) ramp in the
+	 * board record, which is what the shipped device is calibrated from
+	 * too; the shipped device sits a few codewords above the PG ramp on
+	 * the slower rates because the vendor then applies its own regulatory
+	 * limit table (WlanHAL/Data/8197F/TXPWR_LMT_8197Fmp.txt, real dBm per
+	 * channel and rate section) on top.  Those limits are not ported: in
+	 * this kernel the per-channel regulatory ceiling is cfg80211's job,
+	 * and the levels written here stay inside the factory per-channel
+	 * value the board was calibrated to.
+	 */
+}
+
 /* Cut-A silicon workaround, phydm_phypara_a_cut() verbatim
  * (phydm/rtl8197f/phydm_rtl8197f.c 93-111).  The vendor runs it right
  * after the BB PHY_REG table download only when CutVersion == A
@@ -540,19 +745,11 @@ int rtl8192f_hw_init(struct rtl8192f_soc_priv *priv)
 	priv->cut_version = (rtl8192f_read32(priv, REG_SYS_CFG) >> 12) & 0xf;
 	if (priv->cut_version == 0)
 		rtl8192f_phypara_a_cut(priv);
+
 	rtl8192f_apply_bb_table(priv, rtl8192f_soc_agc_table,
 				RTL8192F_AGC_TABLE_LEN);
 	rtl8192f_apply_rf_table(priv, rtl8192f_soc_radioa_table,
 				RTL8192F_RF_TABLE_LEN);
-
-	/*
-	 * Per-rate TX power (PA drive).  The 8197F takes TX gain from the
-	 * BB TxAGC registers, and the BB init table leaves 0xe00/0xe04/
-	 * 0xe08 (path-A OFDM/CCK1M groups) at zero, matching the vendor
-	 * source table (halhwimg8197f_bb.c 5230-5235) - the vendor's
-	 * normal init path never writes these either, so they stay
-	 * unprogrammed here as well.
-	 */
 
 	/* config_phydm_parameter_8197f_init(ODM_POST_SETTING): enable
 	 * the OFDM and CCK blocks.  Without this the baseband never
@@ -663,11 +860,20 @@ int rtl8192f_hw_init(struct rtl8192f_soc_priv *priv)
 	 * phydm_iqk_8197f.c runs IQK + LCK at init).
 	 */
 	rtl8192f_iqk(priv);
+	/* Channel 1's level until mac80211 programs the real one: the
+	 * factory array is per channel, and leaving the group at the BB
+	 * table's zero would drive every frame from the bottom of the PA
+	 * ladder in the window before the first config().
+	 */
+	rtl8192f_set_tx_power(priv, priv->cur_channel ?: 1);
 
 	priv->hw_ready = true;
 
 	return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* TX power                                                            */
 
 /* ------------------------------------------------------------------ */
 /* Channel switching                                                   */
@@ -692,6 +898,17 @@ int rtl8192f_set_channel(struct rtl8192f_soc_priv *priv, u32 channel)
 	rf18 |= channel;
 
 	rtl8192f_phy_set_rf_reg(priv, RF_REG_MODE_AG, rf18);
+
+	/* The vendor recalibrates and re-programs the PA ladder on every
+	 * channel switch, not only at bring-up: SwChnl() calls
+	 * PHY_IQCalibrate() (8192cd_hw.c 7523, 7530 - skipped only in
+	 * monitor mode) and then SetTxPowerLevel() (:7461).  IQK tunes the
+	 * modulator's I/Q balance for the frequency the synthesizer is now
+	 * on, so a channel change without it leaves the previous channel's
+	 * correction in place.
+	 */
+	rtl8192f_iqk(priv);
+	rtl8192f_set_tx_power(priv, channel);
 
 	priv->cur_channel = channel;
 

@@ -805,10 +805,14 @@ static int rtl8192f_soc_probe(struct platform_device *pdev)
 		goto err_free_hw;
 	}
 
+	ret = rtl8192f_read_calib(priv);
+	if (ret == -EPROBE_DEFER)
+		goto err_free_hw;
+
 	/* Address precedence: a DT property (mac-address / local-mac-address,
 	 * which a bootloader or packaging layer can fill in), then an nvmem
-	 * cell ("mac-address" from the factory MIB partition in flash, which
-	 * is where this board's real address is kept), then the on-die eFuse,
+	 * cell ("mac-address" from the factory MIB partition in flash), then
+	 * the first field of the board efuse record, then the on-die eFuse,
 	 * then a random locally administered address.
 	 */
 	ret = of_get_mac_address(pdev->dev.of_node, priv->mac_addr);
@@ -819,6 +823,12 @@ static int rtl8192f_soc_probe(struct platform_device *pdev)
 					       priv->mac_addr);
 		if (ret == -EPROBE_DEFER)
 			goto err_free_hw;
+	}
+	if (ret && priv->has_calib &&
+	    is_valid_ether_addr(priv->calib + RTL8192F_CAL_MAC)) {
+		ether_addr_copy(priv->mac_addr,
+				priv->calib + RTL8192F_CAL_MAC);
+		ret = 0;
 	}
 	if (ret) {
 		ret = rtl8192f_efuse_get_macaddr(priv);

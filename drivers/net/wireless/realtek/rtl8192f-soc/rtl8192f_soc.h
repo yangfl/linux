@@ -736,6 +736,31 @@ extern const struct rtl8192f_rfregval rtl8192f_soc_radioa_table[RTL8192F_RF_TABL
 /* Private state                                                       */
 /* ------------------------------------------------------------------ */
 
+/* Board efuse record: the factory block this WiFi core is calibrated
+ * from, taken whole out of the flash MIB partition as a single nvmem
+ * cell and indexed here, at the offsets the vendor's own record layout
+ * uses (struct hw_wlan_setting, users/boa/.../rtk_tx_calibration.c
+ * 43-148).  Power entries are one TXAGC codeword per 2.4 GHz channel,
+ * channel 1 first; 0 means the board stores no level for that channel,
+ * which is also how the vendor tests it (Hal88XXPhyCfg.c 4372, 4666).
+ * The diff bytes pack two 4-bit signed steps each, low nibble path A
+ * and high nibble path B (COUNT_SIGN_OFFSET(), 8192cd_cfg.h 322).
+ */
+#define RTL8192F_CAL_MAC			0
+#define RTL8192F_CAL_PWR_CCK_A			48
+#define RTL8192F_CAL_PWR_CCK_B			62
+#define RTL8192F_CAL_PWR_HT40_A			76
+#define RTL8192F_CAL_PWR_HT40_B			90
+#define RTL8192F_CAL_DIFF_HT40_2S		104
+#define RTL8192F_CAL_DIFF_HT20			118
+#define RTL8192F_CAL_DIFF_OFDM			132
+#define RTL8192F_CAL_REG_DOMAIN			146
+#define RTL8192F_CAL_RFE_TYPE			147
+#define RTL8192F_CAL_XTAL			149
+#define RTL8192F_CAL_THERMAL			152
+#define RTL8192F_NUM_CHANNEL			14
+#define RTL8192F_CAL_LEN			163
+
 struct rtl8192f_soc_priv {
 	struct ieee80211_hw *hw;
 	struct platform_device *pdev;
@@ -792,6 +817,9 @@ struct rtl8192f_soc_priv {
 
 	u8 mac_addr[ETH_ALEN];
 	u8 cut_version;	/* SYS_CFG[15:12], vendor ODM_CMNINFO_CUT_VER */
+
+	u8 calib[RTL8192F_CAL_LEN];
+	bool has_calib;
 
 	/* flags reported to mac80211 by configure_filter() */
 	u32 filter_flags;
@@ -957,6 +985,7 @@ void rtl8192f_send_ra_mask(struct rtl8192f_soc_priv *priv, u8 macid,
 u8 rtl8192f_ra_rate_id(const struct ieee80211_sta *sta);
 void rtl8192f_hw_power_off(struct rtl8192f_soc_priv *priv);
 int rtl8192f_set_channel(struct rtl8192f_soc_priv *priv, u32 channel);
+int rtl8192f_read_calib(struct rtl8192f_soc_priv *priv);
 int rtl8192f_efuse_read(struct rtl8192f_soc_priv *priv);
 int rtl8192f_efuse_get_macaddr(struct rtl8192f_soc_priv *priv);
 
