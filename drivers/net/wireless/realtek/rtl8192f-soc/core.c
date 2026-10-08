@@ -249,10 +249,25 @@ int rtl8192f_add_interface(struct ieee80211_hw *hw,
 	bool extra_bss, readded;
 	u8 mbid;
 
+	/* A four-address (WDS-style) station is carried on an AP_VLAN of the AP
+	 * that moved it there, and the VLAN needs no hardware state of its own:
+	 * still one BSS, one beacon slot, one REG_MACID, no address CAM entry.
+	 * mac80211 builds the 30-octet RA/TA/DA/SA header itself, this driver
+	 * sizes both directions from ieee80211_hdrlen() (txrx.c) and sets
+	 * RCR_AAP (hw.c), so nothing on the frame path is special - only the
+	 * pairwise key is (rtl8192f_sta_set_4addr, rtl8192f_set_key).
+	 *
+	 * The vendor's WDS is a different thing and is not ported: its own
+	 * netdevs driven by iwpriv mib keys, a mapping key whose PSK is salted
+	 * with a literal string, and in the tree used as the reference it is
+	 * not compiled at all.
+	 */
 	switch (vif->type) {
 	case NL80211_IFTYPE_STATION:
 	case NL80211_IFTYPE_AP:
 		break;
+	case NL80211_IFTYPE_AP_VLAN:
+		return 0;
 	default:
 		return -EOPNOTSUPP;
 	}
@@ -369,6 +384,12 @@ void rtl8192f_remove_interface(struct ieee80211_hw *hw,
 		rtl8192f_mbidcam_write(priv, rvif->mbid + 1, NULL, false);
 		clear_bit(rvif->mbid, priv->bssid_map);
 		rvif->mbid_set = false;
+	} else if (vif != priv->bss_vif) {
+		/* A VLAN took no slot and owns no part of the address set, so
+		 * taking it down must not re-sample the CAM of the BSS that is
+		 * still up.
+		 */
+		return;
 	}
 
 	if (vif != priv->bss_vif) {
@@ -444,6 +465,25 @@ static void rtl8192f_set_bssid(struct rtl8192f_soc_priv *priv, const u8 *addr)
 			 (addr[2] << 16) | (addr[3] << 24));
 	rtl8192f_write16(priv, REG_BSSIDR + 4,
 			 addr[4] | (addr[5] << 8));
+}
+
+/* Remember that this station is carried in four-address form.
+ *
+ * mac80211 sets up the RA/TA/DA/SA header itself for a station that lives on
+ * an AP_VLAN created with NL80211_ATTR_4ADDR (net/mac80211/tx.c
+ * __ieee80211_data_to_8023()); what it tells the driver is only this flag, and
+ * only when the station is moved onto such a VLAN with
+ * NL80211_CMD_SET_STATION (net/mac80211/cfg.c ieee80211_set_sta_4addr).  The
+ * answer decides where the station's pairwise key goes: the in-core engine
+ * cannot carry the extra address on transmit (rtl8192f_set_key()).
+ */
+static void rtl8192f_sta_set_4addr(struct ieee80211_hw *hw,
+				   struct ieee80211_vif *vif,
+				   struct ieee80211_sta *sta, bool enabled)
+{
+	struct rtl8192f_sta *rsta = (struct rtl8192f_sta *)sta->drv_priv;
+
+	rsta->four_addr = enabled;
 }
 
 int rtl8192f_sta_state(struct ieee80211_hw *hw, struct ieee80211_vif *vif,
@@ -806,6 +846,7 @@ static const struct ieee80211_ops rtl8192f_ops = {
 	.conf_tx		= rtl8192f_conf_tx,
 	.ampdu_action		= rtl8192f_ampdu_action,
 	.set_tim		= rtl8192f_set_tim,
+	.sta_set_4addr		= rtl8192f_sta_set_4addr,
 	.set_key		= rtl8192f_set_key,
 	.sw_scan_start		= rtl8192f_sw_scan_start,
 	.sw_scan_complete	= rtl8192f_sw_scan_complete,
@@ -1104,7 +1145,8 @@ static int rtl8192f_soc_probe(struct platform_device *pdev)
 	hw->vif_data_size = sizeof(struct rtl8192f_vif);
 	hw->sta_data_size = sizeof(struct rtl8192f_sta);
 	hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
-				     BIT(NL80211_IFTYPE_AP);
+				     BIT(NL80211_IFTYPE_AP) |
+				     BIT(NL80211_IFTYPE_AP_VLAN);
 	/* Several BSSIDs share this one radio and its single beacon slot, so
 	 * the combination is a set of AP interfaces on one channel; a station
 	 * interface takes the slot alone (see rtl8192f_add_interface()).

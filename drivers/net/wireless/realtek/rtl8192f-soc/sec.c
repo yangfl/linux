@@ -199,6 +199,28 @@ int rtl8192f_set_key(struct ieee80211_hw *hw, enum set_key_cmd cmd,
 		goto out;
 	}
 
+	if (((struct rtl8192f_sta *)sta->drv_priv)->four_addr) {
+		/* The engine cannot be made to encrypt for a four-address
+		 * station: with the key in the CAM such a station passes nothing in
+		 * either direction, while the same station in three-address form works
+		 * (measured).  Receive is not the problem - the descriptor reports
+		 * four-address frames decrypted with no ICV error, so the AAD the
+		 * engine checks covers the extra address - and the failure is
+		 * transmit-only.  There is no knob left for the host: the
+		 * header-geometry field of this descriptor family, DW3[4:0]
+		 * ("unit: 2 bytes", Hal88XXTxDesc.c 959, 1209) was tried with the
+		 * vendor's own encoding and changed nothing on either leg, and the
+		 * reference build never writes that field outside the MAC-V2
+		 * hardware-shortcut branch.  So the key stays in software for these
+		 * stations.  Note that mac80211 cannot move a key that was already
+		 * handed over (ieee80211_set_sta_4addr() only calls the driver), so a
+		 * station put into four-address form after its key was installed
+		 * keeps that key and stays broken until it re-associates.
+		 */
+		ret = 1;
+		goto out;
+	}
+
 	entry = rtl8192f_cam_slot(priv, key);
 	if (entry < 0)
 		entry = find_next_zero_bit(priv->cam_map, CAM_ENTRIES,

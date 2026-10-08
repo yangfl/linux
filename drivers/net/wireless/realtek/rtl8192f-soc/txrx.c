@@ -756,6 +756,15 @@ void rtl8192f_txrx_stop(struct rtl8192f_soc_priv *priv)
  * (RX_DW0_SECURITY_SH / RX_DW0_SWDEC_SH, HalComRXDesc.h 74/78) - the
  * same pair of fields rtw88 rx.c 286 tests.  CAM_ALG_NONE is the value
  * a frame the engine did not touch reports.
+ *
+ * Neither test depends on how many addresses the header carries, and
+ * the engine does decrypt four-address frames: the protected
+ * four-address frames a client sources come up with a security type
+ * other than NONE and without RXD_W0_ICV_ERR, so the AAD the engine
+ * checks covers the fourth address.  Only receive - the transmit half
+ * is not four-address aware (rtl8192f_set_key()), which is why a
+ * four-address station has no CAM entry today and never reaches this
+ * path in hardware.
  */
 static bool rtl8192f_rx_hw_decrypted(__le32 rxdesc_w0)
 {

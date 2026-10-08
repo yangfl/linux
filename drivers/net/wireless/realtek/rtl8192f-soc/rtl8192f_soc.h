@@ -795,6 +795,11 @@ struct rtl8192f_vif {
  */
 struct rtl8192f_sta {
 	u8 macid;
+	/* Set by sta_set_4addr for a station carried on a four-address
+	 * AP_VLAN.  It decides where its pairwise key lives - see
+	 * rtl8192f_set_key().
+	 */
+	bool four_addr;
 };
 
 /* Beacon single slot: one TXBD (128B stride area) + one 40B TX info
