@@ -826,13 +826,13 @@ int rtl8192f_hw_init(struct rtl8192f_soc_priv *priv)
 	rtl8192f_write32(priv, REG_EDCA_VI_PARAM, 0x005ea324);
 	rtl8192f_write32(priv, REG_EDCA_VO_PARAM, 0x002fa226);
 
-	/* TX configuration: enable TX, keep rates at defaults.  The
-	 * vendor additionally asks mactx to maintain the DTIM count, the
-	 * group bit and the moreData bit of the resident beacon
-	 * (Hal88XXGen.c 5281, AP branch :531).
+	/* The vendor ORs four bits here; only the two queue-counter
+	 * updates apply to this part, and BIT_CFEND_FORMAT (bit 9) is not among
+	 * them.
 	 */
 	rtl8192f_setbits32(priv, REG_TCR, BIT_TCR_UPD_HGQMD |
-			   BIT_TCR_UPD_TIMIE | BIT(0));
+			   BIT_TCR_UPD_TIMIE | BIT(0) |
+			   BIT(12) | BIT(13));
 
 	/* Accept only PS-Poll among control frames (vendor MAC_V2 branch,
 	 * Hal88XXGen.c 524 `W16(REG_RXFLTMAP1, BIT_CTRLFLT10EN)`; the MP

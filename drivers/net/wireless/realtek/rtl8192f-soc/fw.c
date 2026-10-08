@@ -504,14 +504,18 @@ out:
 /* The 88XX family also has H2C_88XX_AP_REQ_TXREP (0x43, vendor
  * Hal88XXFirmware.h 209), answered by C2H id C2H_88XX_TX_RATE (4) with the
  * per-MACID success/failure totals (8192cd_sme.c:7616-7634, decode
- * 8192cd_util.c:8345-8374).  It is not sent here, and the verdict was
- * re-made with a valid predicate: three requests on the board were each
- * acknowledged (REG_FWISR FS_H2CCMD) and moved nothing - the RX-side C2H
- * count stayed 0, REG_C2HEVT (0x1A0..0x1AF, the vendor's other C2H window,
- * HalComReg.h:279) read back all zero, and neither FS_TRXRPT_INT nor
- * FS_C2H_W_READY asserted in REG_FWISR.  Every route a report could arrive
- * on is empty, so there is no aggregate to decode.
+ * 8192cd_util.c:8345-8374).  It is not sent here for its answer, and the
+ * verdict was re-made with a valid predicate: three requests on the board
+ * were each acknowledged (REG_FWISR FS_H2CCMD) and moved nothing - the
+ * RX-side C2H count stayed 0, REG_C2HEVT (0x1A0..0x1AF, the vendor's other
+ * C2H window, HalComReg.h:279) read back all zero, and neither
+ * FS_TRXRPT_INT nor FS_C2H_W_READY asserted in REG_FWISR.  Every route a
+ * report could arrive on is empty, so there is no aggregate to decode.
+ * What is useful is exactly that dead end: a command nobody consumes is a
+ * question with a harmless content, so its acknowledgment serves as the
+ * liveness test (rtl8192f_fw_alive).
  */
+#define H2C_88XX_AP_REQ_TXREP	0x43
 /*
  * Did the firmware take the command we just published?
  *
@@ -589,6 +593,29 @@ int rtl8192f_h2c_send(struct rtl8192f_soc_priv *priv, u8 id,
 
 	mutex_unlock(&priv->h2c_mutex);
 	return ret;
+}
+
+/* Ask the in-core scheduler whether it is still reading its mailbox.
+ *
+ * REG_HMETFR cannot answer this on the 8197F (its box-full bits never drop,
+ * above), so the only take-it signal this part produces is FS_H2CCMD, which
+ * h2c_cmd_taken() polls.  The command chosen is the transmit-report request:
+ * its answer never reaches the host on this chip (see the note above), so
+ * asking cannot change what the caller is trying to observe.
+ *
+ * Returns 0 when the firmware took the command, -ETIMEDOUT when it did not,
+ * -ENODEV when no firmware is running.  Sleeps up to the vendor's 12 ms poll
+ * budget, so only call it from process context.
+ */
+int rtl8192f_fw_alive(struct rtl8192f_soc_priv *priv)
+{
+	u8 macid = 0;
+
+	if (!priv->fw_ready)
+		return -ENODEV;
+
+	return rtl8192f_h2c_send(priv, H2C_88XX_AP_REQ_TXREP, &macid,
+				 sizeof(macid));
 }
 
 void rtl8192f_send_ra_mask(struct rtl8192f_soc_priv *priv, u8 macid,

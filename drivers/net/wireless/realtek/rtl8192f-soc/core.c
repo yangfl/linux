@@ -148,6 +148,8 @@ static int rtl8192f_start(struct ieee80211_hw *hw)
 
 	ieee80211_wake_queues(hw);
 
+	rtl8192f_tx_watch_start(priv);
+
 out:
 	mutex_unlock(&priv->conf_mutex);
 	return ret;
@@ -158,6 +160,8 @@ static void rtl8192f_stop(struct ieee80211_hw *hw, bool suspend)
 	struct rtl8192f_soc_priv *priv = hw->priv;
 
 	mutex_lock(&priv->conf_mutex);
+
+	rtl8192f_tx_watch_stop(priv);
 
 	ieee80211_stop_queues(hw);
 	rtl8192f_write16(priv, REG_CR,
@@ -536,6 +540,26 @@ void rtl8192f_bss_info_changed(struct ieee80211_hw *hw,
 	mutex_unlock(&priv->conf_mutex);
 }
 
+/*
+ * AP link power save is not implemented here and there is no .set_tim.
+ *
+ * mac80211 only computes a station's TIM bit for the driver through
+ * set_tim, and that bit flips whenever the station has frames queued -
+ * including for an awake station, because the buffered-TID set it uses
+ * covers the driver's TX queues.  Re-uploading the resident beacon slot
+ * on each such flip gates BCN_OWN away from the hardware while it is
+ * fetching a beacon: measured on this board with 4 MB pushed over the
+ * association, that produced 25 "beacon TX error" interrupts in a few
+ * tens of seconds and dropped the peer's RX to the basic rate with 75 %
+ * packet loss, where without set_tim the same run reported none.
+ *
+ * Doing it right means answering PS-POLL (or u-APSD) as well, which
+ * mac80211 offers no host-side path for - the vendor does both from the
+ * in-core scheduler, and that firmware is not part of this driver.  So
+ * the TIM stays as mac80211 last built it into the template, and a dozing
+ * client is served when it next transmits.
+ */
+
 static void rtl8192f_op_tx(struct ieee80211_hw *hw,
 			   struct ieee80211_tx_control *control,
 			   struct sk_buff *skb)
@@ -711,6 +735,21 @@ irqreturn_t rtl8192f_interrupt(int irq, void *dev_id)
 
 			rtl8192f_write32(priv, REG_TXDMA_STATUS, st);
 		}
+		/* The RX side has its own latch.  The vendor ISR clears
+		 * REG_RXDMA_STATUS (read + write-back of what was read)
+		 * whenever RX fifo overflow or RXERR fired
+		 * (8192cd_osdep.c 1997-2002); without it the latched bits
+		 * keep the RX error source asserted, which is the same
+		 * class of stuck-error interrupt the RDU masking above
+		 * deals with.
+		 */
+		if (hisr1 & (RTL8192F_HIMR1_FOVW |
+			     RTL8192F_HIMR1_RXERR)) {
+			u32 st = rtl8192f_read32(priv, REG_RXDMA_STATUS);
+
+			if (st)
+				rtl8192f_write32(priv, REG_RXDMA_STATUS, st);
+		}
 		rtl8192f_rx_isr(priv);
 	}
 	/* TX completion: all DOK bits incl. HIGHDOK (bit 7) - group
@@ -749,6 +788,7 @@ static int rtl8192f_soc_probe(struct platform_device *pdev)
 	spin_lock_init(&priv->irq_lock);
 	mutex_init(&priv->h2c_mutex);
 	mutex_init(&priv->conf_mutex);
+	INIT_DELAYED_WORK(&priv->tx_watch, rtl8192f_tx_watch);
 
 	priv->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(priv->regs)) {

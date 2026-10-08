@@ -141,6 +141,7 @@ static u16 queue_to_ac(u8 qidx)
 #define TXD_W4_DATARATE			GENMASK(6, 0)
 #define TXD_W7_TXBUFF			GENMASK(15, 0)
 #define TXD_W4_DATARATE_FB_LIMIT	GENMASK(12, 8)
+#define TXD_W4_RTY_LMT_EN		BIT(17)	/* vendor TX_DW4_RTY_LMT_EN_SH */
 #define TXD_W4_DATA_RT_LMT		GENMASK(23, 18)
 #define TXD_W9_SW_SEQ			GENMASK(23, 12)
 #define TXD_W4_RTSRATE			GENMASK(28, 24)
@@ -841,6 +842,23 @@ static void rtl8192f_fill_tx_desc(struct rtl8192f_soc_priv *priv,
 	 * sets DATARATE_FB_LIMIT 0x1f on the old-datarate chips).
 	 */
 	w4 |= le32_encode_bits(0x1f, TXD_W4_DATARATE_FB_LIMIT);
+
+	/* Per-frame data retry limit.  Without RTY_LMT_EN the MAC applies
+	 * the global short/long limits (REG_RETRY_LIMIT, 0x10/0x10 here),
+	 * so a group addressed frame - which no station will ever ACK -
+	 * burns ten retries on air every time.  The vendor overrides the
+	 * limit per descriptor instead: broadcast/multicast gets
+	 * RTY_LMT_EN with a limit of 0 ("No retry for broadcast",
+	 * Hal88XXTxDesc.c 3689-3694), management frames get 6
+	 * (8192cd_tx.c 3775-3788).  Unicast data keeps the global limits.
+	 */
+	if (bmc) {
+		w4 |= TXD_W4_RTY_LMT_EN;
+		w4 |= le32_encode_bits(0, TXD_W4_DATA_RT_LMT);
+	} else if (is_mgmt) {
+		w4 |= TXD_W4_RTY_LMT_EN;
+		w4 |= le32_encode_bits(6, TXD_W4_DATA_RT_LMT);
+	}
 
 	rtl8192f_tx_fill_rate(priv, desc, tx_info, sta);
 	rate = le32_get_bits(desc[4], TXD_W4_DATARATE);
@@ -1683,6 +1701,335 @@ static void rtl8192f_rx_tasklet(struct tasklet_struct *t)
 void rtl8192f_rx_isr(struct rtl8192f_soc_priv *priv)
 {
 	tasklet_schedule(&priv->rx_tasklet);
+}
+
+/* ------------------------------------------------------------------ */
+/* TX queue stall watch                                                */
+/* ------------------------------------------------------------------ */
+
+/* The vendor watches the same condition from its periodic maintenance
+ * path: check_hangup() (8192cd_sme.c 4037, called at :8262 and :8454)
+ * walks the queues and only then declares a hang - and what it does about
+ * one is a full driver reset with FAST_RECOVERY (backup_sta() /
+ * restore_backup_sta()), not an engine poke.  That code is live in the
+ * shipped build because CHECK_HANGUP comes from CONFIG_PCI_HCI, which
+ * config.mk:27 turns on.
+ *
+ * Here the signal is the pair the completion path already reads: the index we
+ * published and the engine's consumer index.  A ring whose two halves differ
+ * while the engine's value stops moving is not waiting for the medium -
+ * retries over the air still consume descriptors - it is not being served at
+ * all, and a hang is only declared when no ring is keeping up, the same rule
+ * the vendor applies.  The recovery is mac80211's restart rather than a
+ * hand-rolled DMA reset: this core has no per-engine reset to reach (the HAL
+ * only wires CheckHangHandler, Hal8197FGen.c:299, and its own hangup path is a
+ * full driver reset), and a restart re-runs the same bring-up an ifup does.
+ */
+#define RTL8192F_TX_WATCH_PERIOD	(2 * HZ)
+/* Five passes without progress.  A confirmed hang on this core held its index
+ * for well over five minutes with the queues still published, so the window
+ * only has to stay clear of the coincidence where the engine consumes exactly
+ * ring-size * k descriptors between two samples; the vendor waits 60 s
+ * (PENDING_PERIOD, 8192cd.h:3427).
+ */
+#define RTL8192F_TX_WATCH_STALLS	5
+
+/* Channel loading over a window, in microseconds.
+ *
+ * The BBP times CCA-busy itself and needs no transmit permission to do it,
+ * which is what makes the reading usable beside a halted transmitter: it
+ * answers "did the scheduler stop because the air was taken" without asking
+ * the scheduler.  The arm sequence is the vendor's N-series branch
+ * (start_bbp_ch_load(), read_bbp_ch_load(), 8192cd_hw.c 29699-29738), which
+ * their channel-utilisation timer runs continuously in AP mode.
+ */
+static unsigned int rtl8192f_channel_busy_us(struct rtl8192f_soc_priv *priv,
+					     unsigned int window_us,
+					     bool *valid)
+{
+	u32 v;
+
+	rtl8192f_write16(priv, REG_CH_LOAD_PERIOD, window_us / 4);
+	rtl8192f_write32(priv, REG_CH_LOAD_CTRL, 0);
+	rtl8192f_write32(priv, REG_CH_LOAD_CTRL, BIT(8));
+	rtl8192f_write32(priv, REG_CH_LOAD_CTRL, BIT(8) | BIT(0));
+	msleep(window_us / 1000 + 20);
+
+	v = rtl8192f_read32(priv, REG_CH_LOAD_STATUS);
+	*valid = v & BIT(16);
+	if (!*valid)
+		return 0;
+
+	return (rtl8192f_read32(priv, REG_CH_LOAD_COUNT) & GENMASK(15, 0)) * 4;
+}
+
+/* Report the state a halt was found in.
+ *
+ * The watch above can only say that the engine stopped taking descriptors.
+ * Why is not reachable from anything this driver books, and this core offers
+ * no narrower way back: the HAL binds only CheckHangHandler for it
+ * (Hal8197FGen.c:299) and the vendor's own hangup recovery is a full driver
+ * close/open with the stations copied out first (8192cd_sme.c:4716).  On a
+ * live halt, clearing TXPAUSE, re-publishing a ring's write pointer and
+ * toggling REG_CR's MACTXEN were each tried and none moved the consumer
+ * index, while leaving the station behind did not either - so the recovery
+ * stays the restart below and this function is the record taken while the
+ * halt is still on the board.  Three readings separate what is left:
+ *
+ *  - channel loading.  A halt with the air measured busy is a scheduler
+ *    waiting for a TXOP, which the vendor calls an adaptivity hangup and
+ *    answers by changing channel (8192cd_sme.c:4573-4586).  Under bulk
+ *    traffic on a loaded 2.4 GHz channel a normal window measures 10-60%
+ *    busy, so a full window stands out against that baseline by itself.
+ *  - the firmware mailbox.  Asking it for a transmit report is a question
+ *    whose answer never arrives on this chip (fw.c, H2C_88XX_AP_REQ_TXREP),
+ *    so it perturbs nothing; a command that is not taken means the scheduler
+ *    stopped along with the rings rather than merely gating them.
+ *  - the descriptors.  The stalled entry is printed next to the last entry
+ *    the engine really consumed, because a field only the stalled one carries
+ *    is the only way this side can implicate what we published.  Nothing
+ *    here decodes either dump; the comparison is the point.
+ *
+ * The register line is everything that could hold the transmitter without
+ * raising an error latch: TXPAUSE, through which the vendor pauses and
+ * resumes queues (8192cd_sme.c:4583), REG_CR's enable group, the TX and RX
+ * DMA latches, both interrupt status groups, and the RX ring's index pair.
+ * The ring line prints all six TX rings raw: the upper half of each is the
+ * engine's consumer index, the lower half the one we published, so which
+ * rings are behind and by how much is readable without arithmetic.
+ */
+static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
+				    u32 rp)
+{
+	struct rtl8192f_tx_ring *ring = &priv->tx_ring[stalled];
+	struct device *dev = &priv->pdev->dev;
+	struct rtl8192f_txbd stuck_bd, last_bd;
+	u8 stuck_desc[RTL8192F_TX_INFO_DESC_SIZE];
+	unsigned long flags;
+	unsigned int busy_us, window_us = 50000;
+	unsigned int last = (ring->tail + RTL8192F_NUM_TX_DESC - 1) %
+			    RTL8192F_NUM_TX_DESC;
+	bool have_desc = false, slot_ok, busy_valid;
+	char line[160];
+	int off, ret;
+	u8 q;
+
+	slot_ok = rp < RTL8192F_NUM_TX_DESC;
+
+	off = scnprintf(line, sizeof(line), "tx halt rings:");
+	for (q = 0; q < Q_NUM; q++) {
+		if (q == Q_BEACON)
+			continue;
+		off += scnprintf(line + off, sizeof(line) - off, " %s=0x%08x",
+				 priv->tx_ring[q].name,
+				 rtl8192f_read32(priv, queue_regs_tbl[q].idx));
+	}
+	dev_err(dev, "%s\n", line);
+
+	dev_err(dev,
+		"tx halt: pause=0x%02x cr=0x%04x txdma=0x%x rxdma=0x%x hisr=0x%08x/0x%08x fwisr=0x%x rxidx=0x%08x\n",
+		rtl8192f_read8(priv, REG_TXPAUSE),
+		rtl8192f_read16(priv, REG_CR),
+		rtl8192f_read32(priv, REG_TXDMA_STATUS),
+		rtl8192f_read32(priv, REG_RXDMA_STATUS),
+		rtl8192f_read32(priv, REG_HISR0),
+		rtl8192f_read32(priv, REG_HISR1),
+		rtl8192f_read32(priv, REG_FWISR),
+		rtl8192f_read32(priv, REG_RXQ_RXBD_IDX));
+
+	/* Copy the descriptor bytes under the lock the reaper uses, and print
+	 * them after it: the liveness question below sleeps, and the skb this
+	 * slot holds is only guaranteed to stay put while the reaper is out.
+	 */
+	if (slot_ok) {
+		spin_lock_irqsave(&priv->irq_lock, flags);
+		stuck_bd = *txbd_of(ring, rp);
+		last_bd = *txbd_of(ring, last);
+		if (ring->info[rp].skb) {
+			memcpy(stuck_desc, ring->info[rp].skb->data,
+			       sizeof(stuck_desc));
+			have_desc = true;
+		}
+		spin_unlock_irqrestore(&priv->irq_lock, flags);
+	}
+
+	busy_us = rtl8192f_channel_busy_us(priv, window_us, &busy_valid);
+	ret = rtl8192f_fw_alive(priv);
+	dev_err(dev,
+		"tx halt: channel busy %u us of %u us (%s), firmware %s the request\n",
+		busy_us, window_us, busy_valid ? "count valid" : "no count",
+		ret ? "ignores" : "took");
+
+	if (!slot_ok) {
+		dev_err(dev, "tx halt: consumer index %u is outside the ring\n",
+			rp);
+		return;
+	}
+
+	if (have_desc)
+		dev_err(dev, "tx halt: stalled slot %u txbd %*ph desc %*ph\n",
+			rp, (int)sizeof(stuck_bd), &stuck_bd,
+			(unsigned int)sizeof(stuck_desc), stuck_desc);
+	else
+		dev_err(dev,
+			"tx halt: stalled slot %u txbd %*ph, no skb in it\n",
+			rp, (int)sizeof(stuck_bd), &stuck_bd);
+	dev_err(dev, "tx halt: last consumed slot %u txbd %*ph\n", last,
+		(int)sizeof(last_bd), &last_bd);
+}
+
+/* Minimum spacing between two recovery restarts.
+ *
+ * A restart that does not cure the wedge leaves the detector armed again the
+ * moment .start() has finished, and the same ring was re-declared 17.9 s after
+ * the pass that gave up on it.  Unbounded, that cadence is a restart every
+ * twenty seconds, which never lets an association live long enough here to
+ * carry traffic.
+ */
+#define RTL8192F_TX_RECOVER_GAP		(60 * HZ)
+
+/* Recover a halted transmit path.
+ *
+ * The engine consumes host-published descriptors again only after the core has
+ * been re-initialised: measured at eleven separate halts, the mailbox refill,
+ * the three H2C commands the AP path normally leaves unsent, REG_TX_HANG_CTRL's
+ * search-queue and OQT-bypass bits, a same-value TXBD_IDX write, a hardware
+ * read-pointer write, the ring re-arm (NUM then DESA) and a full ring bring-up
+ * each left the read pointer exactly where it was.  Clearing the halted
+ * queue's own read pointer does make it fetch again, but the engine then walks
+ * slots the host already reclaimed, so that is not a usable recovery.
+ *
+ * Waiting is no better: of 12 declarations that were watched for 30 s instead
+ * of restarted, 11 still had the ring unconsumed at the expiry.  Restart is
+ * therefore the action, bounded to one per RTL8192F_TX_RECOVER_GAP.
+ *
+ * Returns whether the restart happened.  A deferred one must not end the watch:
+ * only a restart re-arms this work through .start(), so the caller has to
+ * reschedule it itself.
+ */
+static bool rtl8192f_tx_recover(struct rtl8192f_soc_priv *priv, int q,
+				unsigned int pending)
+{
+	if (priv->tx_recoveries &&
+	    time_before(jiffies,
+			priv->tx_last_recover + RTL8192F_TX_RECOVER_GAP)) {
+		dev_err(&priv->pdev->dev,
+			"tx stall on %s: %u published, restart deferred, %u recoveries done\n",
+			priv->tx_ring[q].name, pending, priv->tx_recoveries);
+		return false;
+	}
+
+	priv->tx_last_recover = jiffies;
+	priv->tx_recoveries++;
+	/* Cleared together with the rings, whose cursors .start() re-bases.
+	 */
+	memset(priv->tx_stall, 0, sizeof(priv->tx_stall));
+	/* Queues the restart work; it calls back into stop()/start(), which
+	 * cancels and re-arms this work, so nothing is rescheduled here.
+	 */
+	ieee80211_restart_hw(priv->hw);
+	return true;
+}
+
+void rtl8192f_tx_watch(struct work_struct *work)
+{
+	struct rtl8192f_soc_priv *priv =
+		container_of(to_delayed_work(work), struct rtl8192f_soc_priv,
+			     tx_watch);
+	unsigned long flags;
+	int stalled = -1;
+	int alive = 0;
+	u32 stalled_pending = 0, stalled_rp = 0;
+	u32 q;
+
+	if (!READ_ONCE(priv->running))
+		return;
+
+	spin_lock_irqsave(&priv->irq_lock, flags);
+	for (q = 0; q < Q_NUM; q++) {
+		const struct rtl8192f_queue_regs *qr = &queue_regs_tbl[q];
+		struct rtl8192f_tx_ring *ring = &priv->tx_ring[q];
+		u32 idx, rp;
+
+		if (q == Q_BEACON)
+			continue;	/* not a host-advanced ring */
+
+		if (ring->head == ring->tail) {
+			priv->tx_stall[q] = 0;
+			continue;
+		}
+
+		/*
+		 * The queue is alive the moment the engine's index equals the
+		 * one we published; that equality, not a change between two
+		 * samples, is what the vendor tests
+		 * (((idx >> 16) ^ idx) & 0xffff == 0, 8192cd_sme.c:4148).  Both
+		 * halves are indices modulo the ring length, so a sample taken
+		 * after the engine consumed exactly ring-size * k descriptors
+		 * reads back unchanged while the engine was busy: measured here
+		 * as a "frozen" index that moved again within 100 ms.  Equality
+		 * can only err the other way - a coincidental match clears the
+		 * counter and delays a declaration.
+		 */
+		idx = rtl8192f_read32(priv, qr->idx);
+		rp = (idx >> 16) & TXBD_NUM_MASK;
+		if (((idx >> 16) ^ idx) & 0xffff) {
+			if (rp == priv->tx_last_rp[q]) {
+				if (priv->tx_stall[q] <
+				    RTL8192F_TX_WATCH_STALLS)
+					priv->tx_stall[q]++;
+			} else {
+				priv->tx_stall[q] = 0;
+			}
+		} else {
+			/* Engine has caught up with what we published. */
+			alive = 1;
+			priv->tx_stall[q] = 0;
+		}
+		priv->tx_last_rp[q] = rp;
+
+		if (priv->tx_stall[q] >= RTL8192F_TX_WATCH_STALLS) {
+			stalled = q;
+			stalled_pending = (ring->head - ring->tail) &
+					  (RTL8192F_NUM_TX_DESC - 1);
+			stalled_rp = rp;
+		}
+	}
+
+	if (alive) {
+		/* Any queue the engine is keeping up with means the scheduler
+		 * itself is running, so no ring is hung and every counter is
+		 * dropped - the vendor's rule (8192cd_sme.c:4184).
+		 */
+		memset(priv->tx_stall, 0, sizeof(priv->tx_stall));
+		stalled = -1;
+	}
+	spin_unlock_irqrestore(&priv->irq_lock, flags);
+
+	if (stalled < 0) {
+		schedule_delayed_work(&priv->tx_watch,
+				      RTL8192F_TX_WATCH_PERIOD);
+		return;
+	}
+
+	dev_err(&priv->pdev->dev,
+		"tx stall on %s: %u descriptor(s) published, consumer index stuck at %u\n",
+		priv->tx_ring[stalled].name, stalled_pending, stalled_rp);
+	rtl8192f_tx_halt_report(priv, stalled, stalled_rp);
+	if (rtl8192f_tx_recover(priv, stalled, stalled_pending))
+		return;
+	schedule_delayed_work(&priv->tx_watch, RTL8192F_TX_WATCH_PERIOD);
+}
+
+void rtl8192f_tx_watch_start(struct rtl8192f_soc_priv *priv)
+{
+	memset(priv->tx_stall, 0, sizeof(priv->tx_stall));
+	schedule_delayed_work(&priv->tx_watch, RTL8192F_TX_WATCH_PERIOD);
+}
+
+void rtl8192f_tx_watch_stop(struct rtl8192f_soc_priv *priv)
+{
+	cancel_delayed_work_sync(&priv->tx_watch);
 }
 
 /* ------------------------------------------------------------------ */

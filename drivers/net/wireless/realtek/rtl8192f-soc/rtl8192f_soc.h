@@ -139,6 +139,17 @@
 					 * be preceded by a clear or it
 					 * reports stale bits.
 					 */
+#define REG_RXDMA_STATUS	0x0288	/* RXDMA error latches (W1C), the
+					 * counterpart of REG_TXDMA_STATUS:
+					 * RXFOVW/RXERR set these and the
+					 * vendor ISR read+write-clears the
+					 * register (8192cd_osdep.c 1997-
+					 * 2002, REG_RXDMA_STATUS offset from
+					 * halmac_bit2.h 12191).  Leaving it
+					 * latched keeps the RX error source
+					 * asserted, the same failure mode the
+					 * RDU masking above works around.
+					 */
 /* HSISR mask (GPIO9/AXI-exception group, halmac_reg2.h 1789); the
  * matching status register is REG_HSISR below.
  */
@@ -269,6 +280,19 @@
  * arbitrated away and never grants TXREQ (pages never drain).
  */
 #define REG_DIS_TXREQ_CLR		0x0523
+/* Channel loading measurement: the BBP times CCA-busy itself over a window
+ * the host programs in 4 us units, arms it through 0x890 (reset, then arm,
+ * then start) and leaves the count in 0x8d0 with 0x8b4 bit16 as the valid
+ * flag.  The vendor's N-series branch of start_bbp_ch_load()/read_bbp_ch_load()
+ * covers this chip (8192cd_hw.c 29699-29738) and its channel-utilisation timer
+ * runs it continuously, so the counter needs no transmit permission to work -
+ * which is what makes it usable next to a halted transmitter.
+ */
+#define REG_CH_LOAD_CTRL		0x0890	/* bit8 arms, bit0 starts */
+#define REG_CH_LOAD_PERIOD		0x0894	/* u16, window in 4 us units */
+#define REG_CH_LOAD_STATUS		0x08b4	/* bit16: count is valid */
+#define REG_CH_LOAD_COUNT		0x08d0	/* bits 15:0, 4 us units */
+
 /* Short[15:8] / long[7:0] retry limits (HalComReg.h 697); zero limits
  * can keep the MAC from transmitting at all.  Vendor AP defaults
  * (HalCfg.h 626-630, non-CONFIG_RTL8672): 0x10/0x10.
@@ -794,6 +818,17 @@ struct rtl8192f_soc_priv {
 	 */
 	struct tasklet_struct rx_tasklet;
 
+	/* TX queue stall watch (rtl8192f_tx_watch): the consumer index the
+	 * hardware published for each host-advanced ring, and how many
+	 * passes in a row it has not moved while that ring still holds
+	 * descriptors.  Written only by the work, read there too.
+	 */
+	struct delayed_work tx_watch;
+	u32 tx_last_rp[Q_NUM];
+	u8 tx_stall[Q_NUM];
+	u32 tx_recoveries;
+	unsigned long tx_last_recover;
+
 	bool hw_ready;
 	bool running;
 	u32 cur_channel;
@@ -978,6 +1013,7 @@ int rtl8192f_hw_fifo_init(struct rtl8192f_soc_priv *priv);
 int rtl8192f_fw_download(struct rtl8192f_soc_priv *priv);
 int rtl8192f_h2c_send(struct rtl8192f_soc_priv *priv, u8 id,
 		      const u8 *payload, u8 len);
+int rtl8192f_fw_alive(struct rtl8192f_soc_priv *priv);
 void rtl8192f_c2h_handle(struct rtl8192f_soc_priv *priv, const u8 *pkt,
 			 u32 len);
 void rtl8192f_send_ra_mask(struct rtl8192f_soc_priv *priv, u8 macid,
@@ -1016,6 +1052,9 @@ int rtl8192f_txrx_alloc(struct rtl8192f_soc_priv *priv);
 void rtl8192f_txrx_free(struct rtl8192f_soc_priv *priv);
 int rtl8192f_txrx_start(struct rtl8192f_soc_priv *priv);
 void rtl8192f_txrx_stop(struct rtl8192f_soc_priv *priv);
+void rtl8192f_tx_watch(struct work_struct *work);
+void rtl8192f_tx_watch_start(struct rtl8192f_soc_priv *priv);
+void rtl8192f_tx_watch_stop(struct rtl8192f_soc_priv *priv);
 netdev_tx_t rtl8192f_tx(struct ieee80211_hw *hw, struct sk_buff *skb,
 			struct ieee80211_sta *sta);
 void rtl8192f_tx_isr(struct rtl8192f_soc_priv *priv);
