@@ -621,6 +621,8 @@ int rtl8192f_fw_alive(struct rtl8192f_soc_priv *priv)
 void rtl8192f_send_ra_mask(struct rtl8192f_soc_priv *priv, u8 macid,
 			   const struct ieee80211_sta *sta)
 {
+	bool wide = sta->deflink.bandwidth >= IEEE80211_STA_RX_BW_40;
+	u16 sgi_cap = wide ? IEEE80211_HT_CAP_SGI_40 : IEEE80211_HT_CAP_SGI_20;
 	u8 cmd[7];
 	u32 ratr;
 	int ret;
@@ -651,15 +653,20 @@ void rtl8192f_send_ra_mask(struct rtl8192f_soc_priv *priv, u8 macid,
 	 * selector - phydm_rate_id_mapping() picks it from mode/streams/
 	 * bandwidth - so it must be the same value the TX descriptor's
 	 * RATE_ID field carries, or the scheduler looks up a ladder that
-	 * does not describe this peer's band width.
+	 * does not describe this peer's band width.  The GI bit is the one
+	 * belonging to that width, not always the 20 MHz one
+	 * (Get_RA_ShortGI88XX, :1098-1111).
 	 */
 	cmd[1] = rtl8192f_ra_rate_id(sta) |
-		 ((sta->deflink.ht_cap.cap &
-		   cpu_to_le16(IEEE80211_HT_CAP_SGI_20)) ? BIT(7) : 0);
-	/* Bandwidth 0 (this driver never advertises HT40) plus
-	 * DisableTXPowerTraining, as the vendor sets them (:1542-1547).
+		 ((sta->deflink.ht_cap.cap & cpu_to_le16(sgi_cap)) ?
+		  BIT(7) : 0);
+	/* Band width in bits[1:0], with the vendor's own codes (0 = 20 MHz,
+	 * 1 = 40 MHz) and DisableTXPowerTraining, as the vendor sets them
+	 * (:1553-1555).  sta->deflink.bandwidth is the peer's width already
+	 * capped by this BSS's chandef, which is the pair of tests the
+	 * vendor applies (is_40m_bw && pstat->tx_bw, :1278-1289).
 	 */
-	cmd[2] = BIT(6);
+	cmd[2] = (wide ? 1 : 0) | BIT(6);
 	put_unaligned_le32(ratr, &cmd[3]);
 
 	ret = rtl8192f_h2c_send(priv, H2C_88XX_RA_MASK, cmd, sizeof(cmd));

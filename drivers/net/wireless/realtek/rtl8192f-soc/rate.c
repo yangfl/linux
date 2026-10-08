@@ -162,6 +162,24 @@ static const s8 rtl8192f_cck_rssi_base[8] = {
 	2, -2, -12, -18, -26, -32, -42, -52
 };
 
+/* Width an HT frame was received at.  The RX info descriptor has no
+ * bandwidth bit, but the type-1 PHY status names the half the frame arrived
+ * on (byte 5's ht_rxsc nibble) next to the analyser's own rf_mode (byte 15
+ * [5:4]): 20 MHz while the analyser is narrow or the frame sits in a single
+ * half, 40 MHz when it spans both.  Legacy OFDM has no 40 MHz form, so only
+ * HT frames need this.  Vendor phydm_hwconfig.c 3270-3289 with
+ * PHY_STATUS_RPT_JAGUAR2_TYPE1.
+ */
+static enum rate_info_bw rtl8192f_rx_bw(const u8 *p)
+{
+	u8 ht_rxsc = p[5] >> 4;
+
+	if (((p[15] >> 4) & 0x3) == 0 || ht_rxsc == 1 || ht_rxsc == 2)
+		return RATE_INFO_BW_20;
+
+	return RATE_INFO_BW_40;
+}
+
 void rtl8192f_rx_fill_status(struct rtl8192f_soc_priv *priv, __le32 *desc,
 			     void *phy_status,
 			     struct ieee80211_rx_status *status)
@@ -190,7 +208,7 @@ void rtl8192f_rx_fill_status(struct rtl8192f_soc_priv *priv, __le32 *desc,
 
 		status->encoding = RX_ENC_HT;
 		status->rate_idx = mcs;
-		status->bw = RATE_INFO_BW_20;
+		status->bw = rtl8192f_rx_bw(p);
 		/* Was falling through into the legacy tail, which
 		 * relabelled every HT frame LEGACY with
 		 * rate_idx = rate - 0x04 (up to 123) - one mac80211
@@ -216,11 +234,10 @@ void rtl8192f_rx_fill_status(struct rtl8192f_soc_priv *priv, __le32 *desc,
 		return;
 	}
 
-	/* OFDM/HT: JAGUAR2 type 1 report, per-path pwdb at bytes 1-4;
+	/* Legacy OFDM: JAGUAR2 type 1 report, per-path pwdb at bytes 1-4;
 	 * single receive path (path A), vendor phydm_GetRxPhyStatusType1
-	 * (rx_path_pwr_db = pwdb - 110).  20 MHz / no-SGI assumed; the
-	 * report's l_rxsc/ht_rxsc nibbles (byte 5) would carry the real
-	 * bandwidth if a wider-channel peer ever shows up.
+	 * (rx_path_pwr_db = pwdb - 110).  No short-GI report exists for this
+	 * core, so the 20 MHz rate stays the reported rate.
 	 */
 	status->encoding = RX_ENC_LEGACY;
 	/* hw_value == array index in the band table (core.c), and the
@@ -229,7 +246,7 @@ void rtl8192f_rx_fill_status(struct rtl8192f_soc_priv *priv, __le32 *desc,
 	 * the untrusted 7-bit field anyway.
 	 */
 	status->rate_idx = min_t(u8, rate, 11);
-	status->bw = RATE_INFO_BW_20;
+	status->bw = RATE_INFO_BW_20;	/* OFDM has no 40 MHz form */
 
 	status->signal = (s8)p[1] - 110;
 }

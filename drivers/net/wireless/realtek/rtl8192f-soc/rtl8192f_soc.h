@@ -268,6 +268,11 @@
 #define REG_HI0Q_TXBD_IDX		0x03B8
 #define REG_RRSR			0x0440	/* Response Rate Set */
 #define REG_ARFR1			0x044C	/* rate fall-back set 1, 64 bit */
+/* Channel width: the secondary-channel index, and the BB/RF bits that
+ * select 20 vs 40 MHz.  Names follow the vendor's phydm register table
+ * (phydm_regdefine11n.h) so a reader can match the write sequences.
+ */
+#define REG_DATA_SC			0x0483	/* [3:0] secondary channel */
 #define REG_HWSEQ_CTRL			0x0423
 #define REG_EDCA_VO_PARAM		0x0500
 #define REG_EDCA_VI_PARAM		0x0504
@@ -348,6 +353,17 @@
 #define REG_RXFLTMAP1			0x06A2	/* control */
 #define REG_RXFLTMAP2			0x06A4	/* data */
 #define BIT_RXFLT_PSPOLL		BIT(10)
+/* BB side of the 20/40 MHz choice (phydm_regdefine11n.h 43/78/87/112/136):
+ * 0x800 bit0 and 0x900 bit0 are the "RF mode" pair, 0x800[14:12] the DAC
+ * clock, 0xca4[27:26] the ADC buffer clock, 0xa00 bit4 the CCK primary
+ * channel, and 0xce4[31:30] the small-bandwidth selector (0 = 20/40 MHz).
+ */
+#define REG_RF_MODE			0x0800
+#define REG_RF_MODE_PAGE9		0x0900
+#define REG_CCK_ANTDIV_PARA1		0x0A00
+#define REG_RXCK_RFMOD			0x0BB0
+#define REG_ANTDIV_PARA1			0x0CA4
+#define REG_SMALL_BANDWIDTH		0x0CE4
 /* Byte registers at 0x60C-0x60F (HalComReg.h 1135-1137, halmac_reg2.h
  * 1809-1811): RX_PKT_LIMIT 0x60C, RX_DLK_TIME 0x60D, and RX_DRVINFO_SZ
  * 0x60F.  A wider write here spills into the neighbours - the previous
@@ -1020,7 +1036,8 @@ void rtl8192f_send_ra_mask(struct rtl8192f_soc_priv *priv, u8 macid,
 			   const struct ieee80211_sta *sta);
 u8 rtl8192f_ra_rate_id(const struct ieee80211_sta *sta);
 void rtl8192f_hw_power_off(struct rtl8192f_soc_priv *priv);
-int rtl8192f_set_channel(struct rtl8192f_soc_priv *priv, u32 channel);
+int rtl8192f_set_channel(struct rtl8192f_soc_priv *priv, u32 channel,
+			 enum nl80211_channel_type chan_type);
 int rtl8192f_read_calib(struct rtl8192f_soc_priv *priv);
 int rtl8192f_efuse_read(struct rtl8192f_soc_priv *priv);
 int rtl8192f_efuse_get_macaddr(struct rtl8192f_soc_priv *priv);

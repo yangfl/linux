@@ -66,6 +66,8 @@ static struct ieee80211_supported_band rtl8192f_band_2g = {
 	.ht_cap		= {
 		.ht_supported = true,
 		.cap = IEEE80211_HT_CAP_SGI_20 |
+		       IEEE80211_HT_CAP_SGI_40 |
+		       IEEE80211_HT_CAP_SUP_WIDTH_20_40 |
 		       IEEE80211_HT_CAP_MAX_AMSDU |
 		       (1 << IEEE80211_HT_CAP_RX_STBC_SHIFT),
 		.ampdu_factor = IEEE80211_HT_MAX_AMPDU_16K,
@@ -88,12 +90,8 @@ static int rtl8192f_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
 		struct ieee80211_channel *ch = hw->conf.chandef.chan;
 
 		if (priv->running)
-			ret = rtl8192f_set_channel(priv, ch->hw_value);
-		if (!ret) {
-			priv->cur_channel = ch->hw_value;
-			priv->cur_chan_type =
-				cfg80211_get_chandef_type(&hw->conf.chandef);
-		}
+			ret = rtl8192f_set_channel(priv, ch->hw_value,
+						   cfg80211_get_chandef_type(&hw->conf.chandef));
 	}
 
 	mutex_unlock(&priv->conf_mutex);
@@ -144,7 +142,8 @@ static int rtl8192f_start(struct ieee80211_hw *hw)
 	priv->running = true;
 
 	if (priv->cur_channel)
-		rtl8192f_set_channel(priv, priv->cur_channel);
+		rtl8192f_set_channel(priv, priv->cur_channel,
+				     priv->cur_chan_type);
 
 	ieee80211_wake_queues(hw);
 

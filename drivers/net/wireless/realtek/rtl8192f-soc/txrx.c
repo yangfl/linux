@@ -145,8 +145,22 @@ static u16 queue_to_ac(u8 qidx)
 #define TXD_W4_DATA_RT_LMT		GENMASK(23, 18)
 #define TXD_W9_SW_SEQ			GENMASK(23, 12)
 #define TXD_W4_RTSRATE			GENMASK(28, 24)
+#define TXD_W5_DATA_SC			GENMASK(3, 0)	/* vendor TX_DW5_DATA_SC_SH 0 */
 #define TXD_W5_DATA_SHORT		BIT(4)
 #define TXD_W5_DATA_BW			GENMASK(6, 5)
+#define TXD_W5_RTS_SC			GENMASK(16, 13)	/* vendor TX_DW5_RTS_SC_SH 13 */
+
+/* W5 DATA_SC codes name the half the frame does *not* use as its center:
+ * 1 with the extension channel above the primary, 2 below it, 3 when the
+ * frame occupies both halves (vendor HalComTXDesc.h 533-534
+ * TXDESC_DATASC_UPPER/LOWER, applied at 8192cd_tx.c 3435-3452 and
+ * 3608-3620).  The encoding is the mirror image of the REG_DATA_SC value
+ * hw.c programs, where below is 1.
+ */
+#define TXD_DATA_SC_ABOVE		1
+#define TXD_DATA_SC_BELOW		2
+#define TXD_DATA_SC_BOTH		3
+#define TXD_DATA_BW_40			1	/* vendor HT_CHANNEL_WIDTH_20_40 */
 
 /* RX info descriptor (24B) DW0/DW3 bit fields, 88XX/8197F layout
  * (halmac_rx_desc_nic.h 20-40/80: CRC32 DW0 bit14, ICVERR DW0 bit15).
@@ -157,9 +171,9 @@ static u16 queue_to_ac(u8 qidx)
 #define RXD_W0_DRV_INFO_SIZE		GENMASK(19, 16)	/* in 8B units */
 #define RXD_W0_SHIFT			GENMASK(25, 24)
 /* DW3: RX_RATE is 7 bits (0-11 legacy linear, 12+ = MCS0+); there are
- * NO SGI/BW fields in the 8197F RX info descriptor - the old W3
- * bits 8/9 reads hit BSSID_FIT/HTC garbage .  SGI/BW
- * reporting needs the PHY status (TODO).
+ * no SGI/BW fields in the 8197F RX info descriptor - the old W3
+ * bits 8/9 reads hit BSSID_FIT/HTC garbage.  Bandwidth comes from the
+ * PHY status instead (rate.c); short GI has no report field at all.
  */
 /* DW2 bit28 marks a firmware-to-host C2H message (HalComRXDesc.h
  * 162/173, mask 0x1 shift 28); the vendor rx path branches on it in
@@ -896,9 +910,7 @@ static void rtl8192f_fill_tx_desc(struct rtl8192f_soc_priv *priv,
 
 	/* W5 DATA_SHORT is one bit serving two meanings: short preamble
 	 * on CCK rates, short GI on HT rates (vendor TX_DW5_DATA_SHORT,
-	 * rtw88 RTW_TX_DESC_W5_DATA_SHORT).  20MHz only: no 40MHz
-	 * operation is configured yet.  TODO: set W5 DATA_BW and W3
-	 * NAVUSEHDR once 40MHz RX/TX is brought up.
+	 * rtw88 RTW_TX_DESC_W5_DATA_SHORT).
 	 */
 	if (!is_mgmt && rate < 4 &&
 	    (tx_info->control.rates[0].flags &
@@ -907,6 +919,27 @@ static void rtl8192f_fill_tx_desc(struct rtl8192f_soc_priv *priv,
 	else if (!is_mgmt && rate >= 0x0c && rate <= 0x13 &&
 		 (tx_info->control.rates[0].flags & IEEE80211_TX_RC_SHORT_GI))
 		w5 |= TXD_W5_DATA_SHORT;
+
+	/* DATA_BW/DATA_SC say how wide this frame is.  The analyser moved
+	 * there or to 20 MHz in rtl8192f_set_bandwidth(), but the PHY takes
+	 * the width per descriptor, so a frame that does not name it is
+	 * transmitted 20 MHz wide no matter what the synthesizer is doing.
+	 * A 40 MHz frame uses both halves; a narrower frame inside a 40 MHz
+	 * BSS has to name which half is its primary, and so does the RTS in
+	 * front of it (vendor 8192cd_tx.c 3435-3437 for the 40 MHz case,
+	 * 3443-3452 and 3608-3620 for the narrower ones).  Rate control only
+	 * offers 40 MHz groups once the peer negotiated that width, so a
+	 * 20 MHz client on a 40 MHz BSS lands in the second arm.
+	 */
+	if (tx_info->control.rates[0].flags & IEEE80211_TX_RC_40_MHZ_WIDTH)
+		w5 |= le32_encode_bits(TXD_DATA_BW_40, TXD_W5_DATA_BW) |
+		      le32_encode_bits(TXD_DATA_SC_BOTH, TXD_W5_DATA_SC);
+	else if (priv->cur_chan_type == NL80211_CHAN_HT40MINUS)
+		w5 |= le32_encode_bits(TXD_DATA_SC_BELOW, TXD_W5_DATA_SC) |
+		      le32_encode_bits(TXD_DATA_SC_BELOW, TXD_W5_RTS_SC);
+	else if (priv->cur_chan_type == NL80211_CHAN_HT40PLUS)
+		w5 |= le32_encode_bits(TXD_DATA_SC_ABOVE, TXD_W5_DATA_SC) |
+		      le32_encode_bits(TXD_DATA_SC_ABOVE, TXD_W5_RTS_SC);
 
 	/* W2 AGG_EN is the switch that makes the core collect consecutive
 	 * descriptors of this macid/queue into one A-MPDU instead of
@@ -2145,6 +2178,14 @@ void rtl8192f_beacon_upload(struct rtl8192f_soc_priv *priv,
 	desc[4] = cpu_to_le32(le32_encode_bits(RTL8192F_BCN_HW_RATE,
 					       TXD_W4_DATARATE) |
 		le32_encode_bits(0x1f, TXD_W4_DATARATE_FB_LIMIT));
+	/* W5: the beacon is a 20 MHz frame, but in a 40 MHz BSS it still has
+	 * to name its primary half (vendor FillBeaconDesc88XX_V1,
+	 * Hal88XXTxDesc.c 3138-3145).
+	 */
+	if (priv->cur_chan_type == NL80211_CHAN_HT40MINUS)
+		desc[5] = cpu_to_le32(le32_encode_bits(TXD_DATA_SC_BELOW, TXD_W5_DATA_SC));
+	else if (priv->cur_chan_type == NL80211_CHAN_HT40PLUS)
+		desc[5] = cpu_to_le32(le32_encode_bits(TXD_DATA_SC_ABOVE, TXD_W5_DATA_SC));
 	/* W7 TXBUFF (see rtl8192f_fill_tx_desc; vendor uses len-24) */
 	desc[7] = cpu_to_le32(len - 24);
 	/* W9 SW_SEQ from the template's own header, as the vendor beacon

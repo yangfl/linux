@@ -492,7 +492,8 @@ static u8 rtl8192f_calib_get(const struct rtl8192f_soc_priv *priv, size_t off)
 	return priv->has_calib ? priv->calib[off] : 0;
 }
 
-static void rtl8192f_set_tx_power(struct rtl8192f_soc_priv *priv, u32 channel)
+static void rtl8192f_set_tx_power(struct rtl8192f_soc_priv *priv, u32 channel,
+				  bool wide)
 {
 	unsigned int idx = channel - 1;
 	const s8 *ofdm_ramp = rtl8192f_pg_ofdm;
@@ -500,12 +501,11 @@ static void rtl8192f_set_tx_power(struct rtl8192f_soc_priv *priv, u32 channel)
 	u8 level, ofdm, ht, ht2s, cck_a, cck_b;
 
 	/* OFDM and HT share one stored level: the HT40 column of the record.
-	 * The OFDM and HT20 groups are that level shifted by their own
-	 * per-channel diff nibble, and MCS8-15 shift the HT20 result once
-	 * more (Hal88XXPhyCfg.c 4490, 4521, 4540).  This core has a single
-	 * transmitter, so only path A is programmed - MCS8-15 still mirror
-	 * the single-stream groups, as they do on the shipped AP (measured:
-	 * 0xe18 == 0xe10 and 0xe1c == 0xe14).
+	 * The OFDM group and, at 20 MHz only, the HT group are that level
+	 * shifted by their own per-channel diff nibble, and MCS8-15 shift the
+	 * HT result once more (Hal88XXPhyCfg.c 4490, 4516, 4521, 4540).  This
+	 * core has a single transmitter, so only path A is programmed -
+	 * MCS8-15 still mirror the single-stream groups.
 	 */
 	level = rtl8192f_calib_get(priv, RTL8192F_CAL_PWR_HT40_A + idx);
 	if (!level)
@@ -514,10 +514,12 @@ static void rtl8192f_set_tx_power(struct rtl8192f_soc_priv *priv, u32 channel)
 				   rtl8192f_calib_get(priv,
 						      RTL8192F_CAL_DIFF_OFDM + idx),
 				   false);
-	ht = rtl8192f_txpwr_diff(level,
-				 rtl8192f_calib_get(priv,
-						    RTL8192F_CAL_DIFF_HT20 + idx),
-				 false);
+	ht = level;
+	if (!wide)
+		ht = rtl8192f_txpwr_diff(ht,
+					 rtl8192f_calib_get(priv,
+							    RTL8192F_CAL_DIFF_HT20 + idx),
+					 false);
 	ht2s = rtl8192f_txpwr_diff(ht,
 				   rtl8192f_calib_get(priv,
 						      RTL8192F_CAL_DIFF_HT40_2S + idx),
@@ -865,7 +867,7 @@ int rtl8192f_hw_init(struct rtl8192f_soc_priv *priv)
 	 * table's zero would drive every frame from the bottom of the PA
 	 * ladder in the window before the first config().
 	 */
-	rtl8192f_set_tx_power(priv, priv->cur_channel ?: 1);
+	rtl8192f_set_tx_power(priv, priv->cur_channel ?: 1, false);
 
 	priv->hw_ready = true;
 
@@ -879,23 +881,91 @@ int rtl8192f_hw_init(struct rtl8192f_soc_priv *priv)
 /* Channel switching                                                   */
 /* ------------------------------------------------------------------ */
 
+/* Secondary channel index for REG_DATA_SC, per get_txsc_92e()
+ * (8192cd_hw.c 18487-18499): 1 when the extension channel sits below the
+ * primary, 2 above, 0 at 20 MHz.
+ */
+#define RTL8192F_DATA_SC_BELOW		1
+#define RTL8192F_DATA_SC_ABOVE		2
+
+/* Program the 20/40 MHz path.  This is SwBWMode88XX_97F()
+ * (Hal8197FPhyCfg.c 78-102) plus the BB half of
+ * config_phydm_switch_bandwidth_8197f() (phydm_hal_api8197f.c 889-961);
+ * the RF half (0x18[11:10]) is folded into the channel write below so the
+ * synthesizer and the width change in one HSSI transaction.
+ *
+ * The DAC clock field (0x800[14:12] = 5) and the ADC buffer clock
+ * (0xca4[27:26] = 2) carry the same value on both widths in the vendor's
+ * 20 MHz and 40 MHz branches, so writing them unconditionally is not a
+ * change of behaviour; the ADC clock (0xbb0[18:16]) is only touched on the
+ * way back to 20 MHz because the vendor's 40 MHz branch leaves it to the BB
+ * init table.
+ */
+static void rtl8192f_set_bandwidth(struct rtl8192f_soc_priv *priv,
+				   enum nl80211_channel_type chan_type)
+{
+	bool wide = chan_type == NL80211_CHAN_HT40PLUS ||
+		    chan_type == NL80211_CHAN_HT40MINUS;
+	u8 sc = 0;
+
+	if (wide)
+		sc = chan_type == NL80211_CHAN_HT40MINUS ?
+			RTL8192F_DATA_SC_BELOW : RTL8192F_DATA_SC_ABOVE;
+
+	rtl8192f_write8(priv, REG_DATA_SC,
+			(rtl8192f_read8(priv, REG_DATA_SC) & 0xf0) | sc);
+
+	rtl8192f_rmw_bb(priv, REG_SMALL_BANDWIDTH, 0xc0000000, 0);
+	rtl8192f_rmw_bb(priv, REG_RF_MODE, BIT(0), wide ? BIT(0) : 0);
+	rtl8192f_rmw_bb(priv, REG_RF_MODE_PAGE9, BIT(0), wide ? BIT(0) : 0);
+	rtl8192f_rmw_bb(priv, REG_RF_MODE, 0x7000, 5 << 12);
+	rtl8192f_rmw_bb(priv, REG_ANTDIV_PARA1, 0xc000000, 2 << 26);
+
+	if (wide) {
+		/* CCK lives in the lower 20 MHz half when the extension
+		 * channel is above the primary (the vendor's
+		 * primary_ch_idx == 1 test).
+		 */
+		rtl8192f_rmw_bb(priv, REG_CCK_ANTDIV_PARA1, BIT(4),
+				chan_type == NL80211_CHAN_HT40MINUS ? BIT(4) : 0);
+	} else {
+		rtl8192f_rmw_bb(priv, REG_RXCK_RFMOD, 0x70000, 4 << 16);
+	}
+
+	/* A width change moves the analyser's passband, so the vendor runs
+	 * the same LCK/IQK as a channel switch does; the caller does it right
+	 * after this.
+	 */
+}
+
 /* vendor phydm_hal_api8197f.c config_phydm_switch_channel_8197f():
  * RF reg 0x18 carries both band select (bits 17:18, cleared for 2.4G)
  * and the central channel number in bits 7:0; the synthesizer is fed
  * the channel number directly, there is no N-divider LUT for 2.4G.
  */
-int rtl8192f_set_channel(struct rtl8192f_soc_priv *priv, u32 channel)
+int rtl8192f_set_channel(struct rtl8192f_soc_priv *priv, u32 channel,
+			 enum nl80211_channel_type chan_type)
 {
+	bool wide = chan_type == NL80211_CHAN_HT40PLUS ||
+		    chan_type == NL80211_CHAN_HT40MINUS;
 	u32 rf18;
 
 	if (!channel || channel > 14)
 		return -EINVAL;
+
+	rtl8192f_set_bandwidth(priv, chan_type);
 
 	rf18 = rtl8192f_phy_get_rf_reg(priv, RF_REG_MODE_AG);
 
 	/* switch to 2.4G band and program central channel */
 	rf18 &= ~(RF_MODE_AG_BAND_MASK | 0xff);
 	rf18 |= channel;
+
+	/* RF bandwidth, 0x18[11:10]: both bits set for 20 MHz, only bit11
+	 * for 40 MHz (phydm_hal_api8197f.c 933, 958-960).
+	 */
+	rf18 &= ~(BIT(11) | BIT(10));
+	rf18 |= wide ? BIT(11) : (BIT(11) | BIT(10));
 
 	rtl8192f_phy_set_rf_reg(priv, RF_REG_MODE_AG, rf18);
 
@@ -908,9 +978,10 @@ int rtl8192f_set_channel(struct rtl8192f_soc_priv *priv, u32 channel)
 	 * correction in place.
 	 */
 	rtl8192f_iqk(priv);
-	rtl8192f_set_tx_power(priv, channel);
+	rtl8192f_set_tx_power(priv, channel, wide);
 
 	priv->cur_channel = channel;
+	priv->cur_chan_type = chan_type;
 
 	return 0;
 }
