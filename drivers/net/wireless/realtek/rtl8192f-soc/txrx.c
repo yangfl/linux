@@ -2123,6 +2123,36 @@ void rtl8192f_tx_watch_stop(struct rtl8192f_soc_priv *priv)
  */
 #define RTL8192F_BCN_HW_RATE	0x04
 
+/* Patch the TIM element of the resident beacon in place.
+ *
+ * This deliberately does not touch the TXBD, its PSLEN or BCN_OWN: the core
+ * re-reads this buffer at every TBTT, and a renewal that gates the slot while
+ * it is fetching is what previously cost beacons (see
+ * rtl8192f_beacon_upload()).  Only a same-length change can be applied this
+ * way, which is the usual case - the TIM bitmap width only moves when the
+ * highest buffered AID crosses a byte boundary - so anything else is refused
+ * and left to the next template renewal.
+ */
+bool rtl8192f_beacon_tim_update(struct rtl8192f_soc_priv *priv,
+				const struct sk_buff *skb, u16 tim_off,
+				u16 tim_len)
+{
+	struct rtl8192f_bcn_slot *bcn = &priv->bcn;
+	bool updated = false;
+
+	if (!tim_off || !tim_len || skb->len != READ_ONCE(bcn->frame_len))
+		return false;
+
+	spin_lock_bh(&priv->irq_lock);
+	if (tim_off + tim_len <= bcn->frame_len) {
+		memcpy(bcn->frame + tim_off, skb->data + tim_off, tim_len);
+		updated = true;
+	}
+	spin_unlock_bh(&priv->irq_lock);
+
+	return updated;
+}
+
 void rtl8192f_beacon_upload(struct rtl8192f_soc_priv *priv,
 			    struct sk_buff *skb)
 {

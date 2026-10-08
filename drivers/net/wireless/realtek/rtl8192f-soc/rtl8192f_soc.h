@@ -1265,6 +1265,9 @@ void rtl8192f_tx_isr(struct rtl8192f_soc_priv *priv);
 void rtl8192f_rx_isr(struct rtl8192f_soc_priv *priv);
 void rtl8192f_beacon_upload(struct rtl8192f_soc_priv *priv,
 			    struct sk_buff *skb);
+bool rtl8192f_beacon_tim_update(struct rtl8192f_soc_priv *priv,
+				const struct sk_buff *skb, u16 tim_off,
+				u16 tim_len);
 
 /* ------------------------------------------------------------------ */
 /* calib.c - IQK / calibration                                         */
