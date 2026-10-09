@@ -222,6 +222,7 @@
 	switch: switch@1b800000 {
 		compatible = "realtek,rtl8197f-switch";
 		reg = <0x1b800000 0x500000>;
+		clocks = <&sysclk RTL8197F_CLK_SWCORE>;
 
 		status = "disabled";
 
