@@ -101,13 +101,17 @@
 				reg = <6>;
 				ethernet = <&eth0>;
 				/*
-				 * Plain "rgmii": both ends (RTL8367RB
-				 * P6 RGMII and the RTL8197F GMAC) use
-				 * their power-on TX/RX delay defaults;
-				 * no extra PCB skew compensation needed
-				 * on this board.
+				 * The switch has to sample the RGMII receive clock
+				 * about 0.6 ns late.  Left at zero the link still
+				 * trains but corrupts frames: the switch's own
+				 * CPU-port dot3StatsFCSErrors grow in step with the
+				 * frames the CPU sends.  Two steps of the ~300 ps
+				 * RX delay ladder is what the vendor boot code and
+				 * the vendor switch driver program for this
+				 * interface.
 				 */
 				phy-mode = "rgmii";
+				rx-internal-delay-ps = <600>;
 
 				fixed-link {
 					speed = <1000>;
