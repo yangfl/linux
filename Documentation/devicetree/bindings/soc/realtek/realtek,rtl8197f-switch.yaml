@@ -12,11 +12,11 @@ maintainers:
 description: |
   The RTL8197F contains a 5+1 port Ethernet switch at a dedicated bus
   window outside the internal peripheral bus.  No switch management
-  (L2, VLAN, offload) is implemented; the bootloader leaves the switch
-  configured.  The node only exists so that the register window is
-  claimed and the minimal bring-up steps the CPU-port NIC
-  (realtek,rtl8197f-eth) depends on are performed; it must be enabled
-  whenever the Ethernet MAC is used.
+  (L2, VLAN, offload) is implemented, but the driver does reset the
+  switch core on probe and performs the minimal bring-up the CPU-port
+  NIC (realtek,rtl8197f-eth) depends on, instead of inheriting the
+  bootloader's configuration.  The node must be enabled whenever the
+  Ethernet MAC is used.
 
   The CPU interface is a port of this switch, not a netdevice of its own:
   frames it forwards only reach the host through the Ethernet MAC wired to
@@ -27,6 +27,9 @@ properties:
     const: realtek,rtl8197f-switch
 
   reg:
+    maxItems: 1
+
+  clocks:
     maxItems: 1
 
   ports:
@@ -63,15 +66,19 @@ properties:
 required:
   - compatible
   - reg
+  - clocks
   - ports
 
 additionalProperties: false
 
 examples:
   - |
+    #include <dt-bindings/clock/realtek-rtl819x-clks.h>
+
     switch@1b800000 {
         compatible = "realtek,rtl8197f-switch";
         reg = <0x1b800000 0x500000>;
+        clocks = <&sysclk RTL8197F_CLK_SWCORE>;
 
         ports {
             #address-cells = <1>;
