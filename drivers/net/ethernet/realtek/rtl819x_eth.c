@@ -57,7 +57,14 @@
  */
 #define RTL_CPUICR		0x00	/* CPU interface control */
 #define RTL_CPURPDCR0		0x04	/* Rx pkthdr desc ring 0 base ptr */
+#define RTL_CPURPDCR(i)		(RTL_CPURPDCR0 + ((i) << 2))
+#define RTL_CPURMDCR0		0x1c	/* Rx mbuf desc ring base ptr */
 #define RTL_CPUTPDCR0		0x20	/* Tx pkthdr desc ring 0 base ptr */
+#define RTL_CPUTPDCR1		0x24	/* Tx pkthdr desc ring 1 base ptr */
+#define RTL_CPUTPDCR2		0x60	/* Tx pkthdr desc ring 2 */
+#define RTL_CPUTPDCR3		0x64	/* Tx pkthdr desc ring 3 */
+#define RTL_TXRINGCR		0x78	/* Tx ring enable, one bit per ring */
+#define RTL_TXRING_EN(n)		BIT(n)	/* ring n takes part in Tx */
 #define RTL_CPUIIMR		0x28	/* interrupt mask */
 #define RTL_CPUIISR		0x2c	/* interrupt status (write 1 to clear) */
 #define RTL_DMA_CR0		0x3c	/* DMA control 0 (FIFO watermarks) */
@@ -65,14 +72,15 @@
 #define RTL_DMA_CR4		0xa0	/* DMA control 4 (Tx ring0 tail aware) */
 #define RTL_CPUICR1		0xa4	/* CPU interface control 1 */
 
-/* RTL_DMA_CR0 [15:8] = HiFifoMark, [7:0] = LowFifoMark.  Vendor
- * rtl865x_start() restores 0xA0/0xA0 for the 8197F because the defaults
- * (0x57) are clobbered when the bus burst size changes.  The upper half
- * of the register holds unrelated fields and is preserved by the
- * read-modify-write.
+/* RTL_DMA_CR0 [15:8] = LowFifoMark, [7:0] = HiFifoMark
+ * (rtl865xc_asicregs.h LowFifoMark_OFFSET 8 / HiFifoMark_MASK (0xff<<0)).
+ * Vendor rtl865x_start() restores 0xA0/0xA0 for the 8197F because the
+ * defaults (0x57) are clobbered when the bus burst size changes.  The
+ * upper half of the register holds unrelated fields and is preserved by
+ * the read-modify-write.
  */
-#define RTL_DMA_CR0_HIFIFO	GENMASK(15, 8)
-#define RTL_DMA_CR0_LOFIFO	GENMASK(7, 0)
+#define RTL_DMA_CR0_LOFIFO	GENMASK(15, 8)
+#define RTL_DMA_CR0_HIFIFO	GENMASK(7, 0)
 #define RTL_DMA_CR0_HIFIFO_MARK	0xa0
 #define RTL_DMA_CR0_LOFIFO_MARK	0xa0
 
@@ -84,6 +92,15 @@
  */
 #define RTL_CPUICR1_PKTHDR	GENMASK(9, 8)
 #define RTL_CPUICR1_PKTHDR_SHORTCUT	FIELD_PREP(RTL_CPUICR1_PKTHDR, 1)
+/*
+ * Bit 1 makes the NIC master drive the Lexra bus little endian
+ * (CF_NIC_LITTLE_ENDIAN_OFFSET in the vendor register header; the bootcode
+ * sets it at the end of its switch init and the vendor kernel sets it with
+ * the format bits).  It is not a performance knob: with it clear the words of
+ * a fetched descriptor arrive byte-swapped, and the Tx engine never releases
+ * the first descriptor.
+ */
+#define RTL_CPUICR1_NIC_LE	BIT(1)
 
 /* RTL_CPUICR bits (rtl865xc_asicregs.h) */
 #define RTL_TXCMD		BIT(31)		/* Tx DMA enable */
@@ -91,6 +108,7 @@
 #define RTL_BUSBURST_128W	(2U << 28)	/* Lexra bus burst = 128 bytes */
 #define RTL_MBUF_2048B		(4U << 24)	/* buffer size indication */
 #define RTL_TXFD		BIT(23)		/* kick Tx descriptor fetch */
+#define RTL_SOFTRST		BIT(22)		/* re-initialize all descriptors */
 
 /* RTL_CPUIIMR / RTL_CPUIISR bits (rtl865xc_asicregs.h).  The ISR is
  * write-one-to-clear.
@@ -162,6 +180,8 @@ struct rtl819x_desc {
 
 #define RTL_NUM_RX_DESC		256
 #define RTL_NUM_TX_DESC		64
+#define RTL_NUM_TX1_DESC	2	/* vendor ring 1 depth, never published to */
+#define RTL_TX1_RING_BYTES	(RTL_NUM_TX1_DESC * sizeof(struct rtl819x_desc))
 #define RTL_TX_WAKE_THRESH	(RTL_NUM_TX_DESC / 4)	/* free slots to wake */
 #define RTL_RX_BUF_SIZE		2048	/* cluster size, see MBUF_2048B */
 
@@ -190,6 +210,15 @@ struct rtl819x_priv {
 	/* descriptor rings (coherent memory) */
 	struct rtl819x_desc	*rx_ring;
 	dma_addr_t		rx_ring_dma;
+	/*
+	 * Ring 1 of the four Tx pkthdr rings.  It carries no traffic: the
+	 * vendor enables rings 0 and 1 only, and a ring the walker may enter
+	 * has to be a valid, WRAP-terminated one, so this two-descriptor
+	 * ring exists for that reason alone (rtl865xc_swNic.h
+	 * NUM_TX_PKTHDR_DESC1 = 2).
+	 */
+	struct rtl819x_desc	*tx1_ring;
+	dma_addr_t		tx1_ring_dma;
 	/*
 	 * Per-descriptor rx buffer slots.  The engine rewrites each
 	 * descriptor address to point at the frame start inside the slot
@@ -307,6 +336,62 @@ static int rtl819x_rx_refill(struct rtl819x_priv *priv, unsigned int idx,
 	return 0;
 }
 
+/*
+ * Is there anything the engines finished that we have not claimed yet?  The
+ * descriptor rings, not the interrupts, are the record of completions: see
+ * the use of this in rtl819x_poll().
+ */
+static bool rtl819x_work_pending(struct rtl819x_priv *priv)
+{
+	bool pending;
+
+	if (!(le32_to_cpu(priv->rx_ring[priv->rx_dirty].opts1) & RTL_DESC_OWN))
+		return true;
+
+	spin_lock(&priv->tx_lock);
+	pending = priv->tx_dirty != priv->tx_curr &&
+		  !(le32_to_cpu(priv->tx_ring[priv->tx_dirty].opts1) &
+		    RTL_DESC_OWN);
+	spin_unlock(&priv->tx_lock);
+
+	return pending;
+}
+
+/*
+ * Claim the Tx descriptors the engine has finished, oldest first, and stop at
+ * the first one still owned.  The caller holds tx_lock; the walk only touches
+ * indices the xmit path parks behind, so tx_curr == tx_dirty means "nothing in
+ * flight".
+ */
+static unsigned int rtl819x_tx_reclaim(struct rtl819x_priv *priv)
+{
+	struct net_device *ndev = priv->ndev;
+	unsigned int dirty = priv->tx_dirty;
+	unsigned int done = 0;
+
+	while (dirty != priv->tx_curr) {
+		struct rtl819x_tx_info *info = &priv->tx_info[dirty];
+		struct rtl819x_desc *desc = &priv->tx_ring[dirty];
+
+		if (le32_to_cpu(desc->opts1) & RTL_DESC_OWN)
+			break;
+
+		if (info->skb) {
+			dma_unmap_single(priv->dev,
+					 dma_unmap_addr(info, mapping),
+					 info->map_len, DMA_TO_DEVICE);
+			rtl819x_count_tx(ndev, info->skb->len);
+			dev_consume_skb_any(info->skb);
+			info->skb = NULL;
+		}
+		dirty = rtl_next_idx(dirty, RTL_NUM_TX_DESC);
+		done++;
+	}
+	priv->tx_dirty = dirty;
+
+	return done;
+}
+
 /* ------------------------------------------------------------------ */
 /* NAPI                                                                */
 /* ------------------------------------------------------------------ */
@@ -317,7 +402,6 @@ static int rtl819x_poll(struct napi_struct *napi, int budget)
 						 napi);
 	struct net_device *ndev = priv->ndev;
 	int work_done = 0;
-	unsigned int dirty;
 
 	/* ---- Rx ---- */
 	/*
@@ -483,33 +567,15 @@ rearm:
 	 */
 	spin_lock(&priv->tx_lock);
 
-	dirty = priv->tx_dirty;
-	while (dirty != priv->tx_curr) {
-		struct rtl819x_tx_info *info = &priv->tx_info[dirty];
-		struct rtl819x_desc *desc = &priv->tx_ring[dirty];
+	rtl819x_tx_reclaim(priv);
 
-		if (le32_to_cpu(desc->opts1) & RTL_DESC_OWN)
-			break;
-
-		if (info->skb) {
-			dma_unmap_single(priv->dev,
-					 dma_unmap_addr(info, mapping),
-					 info->map_len, DMA_TO_DEVICE);
-			ndev->stats.tx_packets++;
-			ndev->stats.tx_bytes += info->skb->len;
-			dev_consume_skb_any(info->skb);
-			info->skb = NULL;
-		}
-		dirty = rtl_next_idx(dirty, RTL_NUM_TX_DESC);
-	}
-	priv->tx_dirty = dirty;
 	/*
 	 * Wake the queue once enough slots drained, before the ring is empty
 	 * (like mvneta's tx_wake_threshold): waking only on a free slot makes
 	 * the queue stop/start oscillate under bursts.
 	 */
 	if (unlikely(netif_queue_stopped(ndev))) {
-		unsigned int in_use = (priv->tx_curr - dirty +
+		unsigned int in_use = (priv->tx_curr - priv->tx_dirty +
 				       RTL_NUM_TX_DESC) % RTL_NUM_TX_DESC;
 
 		if (in_use <= RTL_NUM_TX_DESC - 1 - RTL_TX_WAKE_THRESH)
@@ -518,10 +584,34 @@ rearm:
 
 	spin_unlock(&priv->tx_lock);
 
-	if (work_done < budget) {
-		napi_complete_done(napi, work_done);
-		/* re-enable interrupts */
-		rtl_wr(priv, RTL_CPUIIMR, RTL_IRQ_ALL);
+	if (work_done >= budget)
+		return work_done;
+
+	/* Busy polling or a deferred handler owns the instance and will call
+	 * poll() again: leave the interrupts masked.
+	 */
+	if (!napi_complete_done(napi, work_done))
+		return work_done;
+
+	/* re-enable interrupts */
+	rtl_wr(priv, RTL_CPUIIMR, RTL_IRQ_ALL);
+
+	/*
+	 * An interrupt that arrives while poll() runs is acknowledged by the
+	 * handler without re-arming NAPI (napi_schedule_prep() fails for the
+	 * running instance), so that completion has no interrupt left to
+	 * announce it.  If the Tx walk had already stopped on an owned
+	 * descriptor the queue stays stopped, and nothing but the netdev
+	 * watchdog would clear the stall again.  The rings say what the engines
+	 * finished, so re-arm here when anything is still claimable;
+	 * completions after this check re-assert the now unmasked interrupt
+	 * line.
+	 */
+	if (rtl819x_work_pending(priv)) {
+		if (napi_schedule_prep(napi)) {
+			rtl_wr(priv, RTL_CPUIIMR, 0);
+			__napi_schedule(napi);
+		}
 	}
 
 	return work_done;
@@ -533,12 +623,23 @@ static irqreturn_t rtl819x_interrupt(int irq, void *dev_id)
 	struct rtl819x_priv *priv = netdev_priv(ndev);
 	u32 status;
 
-	status = rtl_rr(priv, RTL_CPUIISR) & RTL_IRQ_ALL;
+	/*
+	 * Acknowledge the whole register, not only the bits this driver enables:
+	 * a status bit nobody clears stays pending forever (the vendor ISR reads
+	 * and acks CPUIISR before filtering it through CPUIIMR).
+	 */
+	status = rtl_rr(priv, RTL_CPUIISR);
+	rtl_wr(priv, RTL_CPUIISR, status);
+
+	status &= RTL_IRQ_ALL;
 	if (!status)
 		return IRQ_NONE;
 
-	rtl_wr(priv, RTL_CPUIISR, status);	/* write 1 to clear */
-
+	/*
+	 * The status is acknowledged even when NAPI cannot be re-armed (a running
+	 * poll() owns the instance): rtl819x_poll() re-checks the rings as it
+	 * re-enables the mask, so what this bit reported is still claimed.
+	 */
 	if (likely(napi_schedule_prep(&priv->napi))) {
 		/* mask interrupts while NAPI polls */
 		rtl_wr(priv, RTL_CPUIIMR, 0);
@@ -568,13 +669,30 @@ static netdev_tx_t rtl819x_start_xmit(struct sk_buff *skb,
 
 	spin_lock(&priv->tx_lock);
 
-	curr = priv->tx_curr;
-	next = rtl_next_idx(curr, RTL_NUM_TX_DESC);
-	if (unlikely(next == priv->tx_dirty)) {
-		netif_stop_queue(ndev);
-		spin_unlock(&priv->tx_lock);
-		netdev_dbg(ndev, "tx ring full\n");
-		return NETDEV_TX_BUSY;
+	/*
+	 * A full ring is reclaimed here, not only from NAPI: the engine can be
+	 * finished with every queued packet while no interrupt announces it
+	 * (see rtl819x_poll()), and a queue stopped on such a ring then waits for
+	 * the netdev watchdog.  The vendor SDK reclaims and retries the same way
+	 * in its start_xmit().
+	 *
+	 * The last free slot is kept out of use: filling it would wrap tx_curr
+	 * onto tx_dirty, the state the reclaim walk reads as "ring empty", and
+	 * that descriptor would never be reclaimed (its skb and DMA mapping
+	 * leak).
+	 */
+	for (;;) {
+		curr = priv->tx_curr;
+		next = rtl_next_idx(curr, RTL_NUM_TX_DESC);
+		if (likely(rtl_next_idx(next, RTL_NUM_TX_DESC) != priv->tx_dirty))
+			break;
+
+		if (!rtl819x_tx_reclaim(priv)) {
+			netif_stop_queue(ndev);
+			spin_unlock(&priv->tx_lock);
+			netdev_dbg(ndev, "tx ring full\n");
+			return NETDEV_TX_BUSY;
+		}
 	}
 
 	/*
@@ -632,9 +750,6 @@ static netdev_tx_t rtl819x_start_xmit(struct sk_buff *skb,
 
 	rtl_kick_tx(priv);
 
-	if (unlikely(next == priv->tx_dirty))
-		netif_stop_queue(ndev);
-
 	spin_unlock(&priv->tx_lock);
 	return NETDEV_TX_OK;
 
@@ -662,11 +777,17 @@ static int rtl819x_init_rings(struct rtl819x_priv *priv)
 					   &priv->tx_ring_dma, GFP_KERNEL);
 	priv->tx_info = kcalloc(RTL_NUM_TX_DESC,
 				sizeof(*priv->tx_info), GFP_KERNEL);
-	if (!priv->rx_ring || !priv->tx_ring || !priv->tx_info)
+	priv->tx1_ring = dma_alloc_coherent(priv->dev, RTL_TX1_RING_BYTES,
+					    &priv->tx1_ring_dma, GFP_KERNEL);
+	if (!priv->rx_ring || !priv->tx_ring || !priv->tx_info ||
+	    !priv->tx1_ring)
 		return -ENOMEM;
 
 	memset(priv->rx_ring, 0, RTL_NUM_RX_DESC * sizeof(*priv->rx_ring));
 	memset(priv->tx_ring, 0, RTL_NUM_TX_DESC * sizeof(*priv->tx_ring));
+	memset(priv->tx1_ring, 0, RTL_NUM_TX1_DESC * sizeof(*priv->tx1_ring));
+	priv->tx1_ring[RTL_NUM_TX1_DESC - 1].opts1 =
+		cpu_to_le32(RTL_DESC_RING_END);
 
 	for (i = 0; i < RTL_NUM_RX_DESC; i++)
 		if (rtl819x_rx_refill(priv, i, GFP_KERNEL))
@@ -712,15 +833,20 @@ static void rtl819x_free_rings(struct rtl819x_priv *priv)
 		dma_free_coherent(priv->dev,
 				  RTL_NUM_TX_DESC * sizeof(*priv->tx_ring),
 				  priv->tx_ring, priv->tx_ring_dma);
+	if (priv->tx1_ring)
+		dma_free_coherent(priv->dev, RTL_TX1_RING_BYTES, priv->tx1_ring,
+				  priv->tx1_ring_dma);
 	kfree(priv->tx_info);
 	priv->tx_info = NULL;
 	priv->rx_ring = NULL;
 	priv->tx_ring = NULL;
+	priv->tx1_ring = NULL;
 }
 
 static int rtl819x_open(struct net_device *ndev)
 {
 	struct rtl819x_priv *priv = netdev_priv(ndev);
+	unsigned int i;
 	int ret;
 
 	/*
@@ -757,9 +883,51 @@ static int rtl819x_open(struct net_device *ndev)
 	rtl_wr(priv, RTL_CPUIIMR, 0);
 	rtl_wr(priv, RTL_CPUIISR, rtl_rr(priv, RTL_CPUIISR));
 
+	/*
+	 * Reset the descriptor engine before configuring it, and do it from a
+	 * state the engine can act on safely: every Tx ring disabled and every
+	 * ring base cleared, so the re-initialisation (CPUICR SOFTRST,
+	 * "Re-initialize all descriptors", rtl865xc_asicregs.h:303) has no
+	 * descriptor list to walk and cannot reach the boot code's buffers.
+	 * The vendor driver never pulses this bit and inherits whatever the
+	 * previous stage left.  open() is the configuration entry point, so
+	 * each bring-up starts here from a re-initialised engine.
+	 */
+	rtl_wr(priv, RTL_TXRINGCR, 0);
+	rtl_wr(priv, RTL_CPUTPDCR0, 0);
+	rtl_wr(priv, RTL_CPUTPDCR1, 0);
+	rtl_wr(priv, RTL_CPUTPDCR2, 0);
+	rtl_wr(priv, RTL_CPUTPDCR3, 0);
+	for (i = 1; i <= 5; i++)
+		rtl_wr(priv, RTL_CPURPDCR(i), 0);
+	rtl_wr(priv, RTL_CPURPDCR0, 0);
+	rtl_wr(priv, RTL_CPURMDCR0, 0);
+	rtl_wr(priv, RTL_CPUICR, RTL_SOFTRST);
+	mdelay(1);
+	rtl_wr(priv, RTL_CPUICR, 0);
+
 	/* descriptor ring base address (rings 1-5 stay off our radar) */
 	rtl_wr(priv, RTL_CPURPDCR0, priv->rx_ring_dma);
 	rtl_wr(priv, RTL_CPUTPDCR0, priv->tx_ring_dma);
+
+	/*
+	 * The Tx walker visits every *enabled* ring, so an enabled ring with
+	 * no valid ring behind it is the failure this prevents: the vendor
+	 * enables rings 0 and 1 only -- rtl865x_asicL2.c clears
+	 * TX_RING2_EN|TX_RING3_EN right after "enable ring1 and ring0 to let
+	 * the hardware state machine healthy" -- and hands each enabled ring a
+	 * WRAP-terminated descriptor list (rtl819x_swNic.c sets DESC_WRAP on
+	 * the last descriptor of every ring it registers).  Programming these
+	 * here instead of leaving whatever the previous stage installed is
+	 * what makes the open() independent of that stage.
+	 */
+	rtl_wr(priv, RTL_CPUTPDCR1, priv->tx1_ring_dma);
+	rtl_wr(priv, RTL_CPUTPDCR2, 0);
+	rtl_wr(priv, RTL_CPUTPDCR3, 0);
+	for (i = 1; i <= 5; i++)
+		rtl_wr(priv, RTL_CPURPDCR(i), 0);
+	rtl_wr(priv, RTL_CPURMDCR0, 0);
+	rtl_wr(priv, RTL_TXRINGCR, RTL_TXRING_EN(0) | RTL_TXRING_EN(1));
 
 	/*
 	 * Vendor sets DMA_CR1 to (ring0 count - 1) * desc size and enables
@@ -772,11 +940,15 @@ static int rtl819x_open(struct net_device *ndev)
 
 	/*
 	 * CPUICR1: select the 6-word descriptor format (see the
-	 * RTL_CPUICR1_PKTHDR comment).
+	 * RTL_CPUICR1_PKTHDR comment) and keep the NIC bus little endian, as
+	 * both the bootcode and the vendor driver do from their own switch
+	 * bring-up -- neither of which is running once the switch core has
+	 * been reset here.
 	 */
 	rtl_wr(priv, RTL_CPUICR1,
-	       (rtl_rr(priv, RTL_CPUICR1) & ~RTL_CPUICR1_PKTHDR) |
-	       RTL_CPUICR1_PKTHDR_SHORTCUT);
+	       (rtl_rr(priv, RTL_CPUICR1) &
+		~(RTL_CPUICR1_PKTHDR | RTL_CPUICR1_NIC_LE)) |
+	       RTL_CPUICR1_PKTHDR_SHORTCUT | RTL_CPUICR1_NIC_LE);
 
 	/* clear any stale interrupt status, then start DMA */
 	rtl_wr(priv, RTL_CPUIISR, rtl_rr(priv, RTL_CPUIISR));
