@@ -20,6 +20,7 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/spinlock.h>
 #include <linux/slab.h>
 
 #include <dt-bindings/clock/realtek-rtl819x-clks.h>
@@ -60,6 +61,16 @@
 #define RTL819X_REG_WLAN_CTRL			0x64
 #define RTL819X_WLAN_CTRL_EN			GENMASK(4, 0)
 #define RTL819X_WLAN_CTRL_STAT			BIT(0)
+
+/*
+ * Embedded switch core gate.  The vendor toggles this bit as part of the
+ * switch core reset (rtl865x_asicCom.c "FullAndSemiReset()":
+ * "REG32(SYS_CLK_MAG) &= ~CM_ACTIVE_SWCORE" ... then sets it back), so the
+ * switch driver needs to gate the clock off and on again; it is a plain
+ * single-bit gate, unlike the five-bit WLAN field above.
+ */
+#define RTL819X_REG_SYS_CLK_MAG			0x10
+#define RTL819X_SWCORE_EN			BIT(11)
 
 /*
  * CPU PLL output frequencies (MHz) indexed by strap bits 15..18,
@@ -198,13 +209,15 @@ static struct clk_hw *rtl819x_register_wlan_gate(struct device *dev,
 	return &wlan->hw;
 }
 
+static DEFINE_SPINLOCK(rtl819x_clk_lock);
+
 static int rtl819x_clk_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct clk_hw_onecell_data *clk_data;
 	struct clk_hw *lx_hw, *uart_hw, *spi_hw;
 	struct clk_hw *pll_hw, *cpu_div_hw, *cpu_hw;
-	struct clk_hw *wlan_hw, *xtal_hw;
+	struct clk_hw *wlan_hw, *xtal_hw, *swcore_hw;
 	unsigned long xtal_rate;
 	static const char *const cpu_parents[] = { "cpu_div", "lx" };
 	static const char *cpu_div_parent = "pll";
@@ -233,6 +246,19 @@ static int rtl819x_clk_probe(struct platform_device *pdev)
 						RTL819X_LX_CLK_RATE);
 	if (IS_ERR(lx_hw))
 		return PTR_ERR(lx_hw);
+
+	/*
+	 * Switch core gate, only meant to pulse the clock during the core
+	 * reset.  CLK_IGNORE_UNUSED lets the framework leave the core clocked
+	 * when no consumer holds a reference.
+	 */
+	swcore_hw = devm_clk_hw_register_gate(dev, "swcore", "lx",
+					      CLK_IGNORE_UNUSED,
+					      base + RTL819X_REG_SYS_CLK_MAG,
+					      ffs(RTL819X_SWCORE_EN) - 1, 0,
+					      &rtl819x_clk_lock);
+	if (IS_ERR(swcore_hw))
+		return PTR_ERR(swcore_hw);
 
 	/* UART input clock: LX / 2 == 100 MHz in the vendor SDK setup */
 	uart_hw = devm_clk_hw_register_fixed_factor(dev, "uart", "lx", 0, 1, 2);
@@ -281,6 +307,7 @@ static int rtl819x_clk_probe(struct platform_device *pdev)
 	clk_data->hws[RTL8197F_CLK_SPI] = spi_hw;
 	clk_data->hws[RTL8197F_CLK_WLAN] = wlan_hw;
 	clk_data->hws[RTL8197F_CLK_WIFI_REF] = xtal_hw;
+	clk_data->hws[RTL8197F_CLK_SWCORE] = swcore_hw;
 
 	ret = devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get,
 					  clk_data);
