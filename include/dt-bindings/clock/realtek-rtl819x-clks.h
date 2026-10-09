@@ -16,7 +16,9 @@
 #define RTL8197F_CLK_WLAN	4
 /* Crystal reference fed to the WLAN core (25 or 40 MHz by strap) */
 #define RTL8197F_CLK_WIFI_REF	5
+/* Embedded switch core clock gate in the system controller */
+#define RTL8197F_CLK_SWCORE	6
 
-#define RTL8197F_CLK_NR_CLKS	6
+#define RTL8197F_CLK_NR_CLKS	7
 
 #endif /* _DT_BINDINGS_CLOCK_REALTEK_RTL819X_CLKS_H_ */
