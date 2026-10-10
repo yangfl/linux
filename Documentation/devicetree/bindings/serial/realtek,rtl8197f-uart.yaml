@@ -31,8 +31,9 @@ properties:
   clocks:
     maxItems: 1
     description:
-      Optional bus clock; when absent the driver falls back to
-      clock-frequency.
+      UART input clock, from the SoC clock controller.  When absent the
+      8250 layer falls back to clock-frequency, which is what a board
+      without a clock provider has to use.
 
   clock-frequency: true
 
@@ -43,7 +44,6 @@ required:
   - compatible
   - reg
   - interrupts
-  - clock-frequency
 
 unevaluatedProperties: false
 

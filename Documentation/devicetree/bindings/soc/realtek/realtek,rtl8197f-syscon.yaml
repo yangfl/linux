@@ -21,9 +21,23 @@ properties:
     items:
       - const: realtek,rtl8197f-syscon
       - const: syscon
+      - const: simple-mfd
 
   reg:
     maxItems: 1
+
+  "#address-cells":
+    const: 1
+
+  "#size-cells":
+    const: 1
+
+  ranges:
+    maxItems: 1
+
+patternProperties:
+  '^clock-controller@[0-9a-f]+$':
+    $ref: /schemas/clock/realtek,rtl8197f-clock.yaml
 
 required:
   - compatible
@@ -34,7 +48,17 @@ additionalProperties: false
 examples:
   - |
     syscon@0 {
-        compatible = "realtek,rtl8197f-syscon", "syscon";
+        compatible = "realtek,rtl8197f-syscon", "syscon",
+                     "simple-mfd";
         reg = <0x0 0x200>;
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges = <0x0 0x0 0x200>;
+
+        clock-controller@0 {
+            compatible = "realtek,rtl8197f-clock";
+            reg = <0x0 0x68>;
+            #clock-cells = <1>;
+        };
     };
 ...
