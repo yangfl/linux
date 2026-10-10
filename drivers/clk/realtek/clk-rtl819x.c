@@ -14,12 +14,16 @@
  * read-only clocks, plus the one thing on this SoC that is not a
  * divider: the WLAN clock/function gate the WiFi core cannot be touched
  * without.
+ *
+ * The provider is registered from of_clk_init() rather than from a platform
+ * driver because its first consumers are: cpu@0, whose clock plat_time_init()
+ * turns into mips_hpt_frequency, and the system timer, which timer_probe()
+ * sets up in the same path.  Neither of them can wait for a driver to probe.
  */
 
 #include <linux/clk-provider.h>
 #include <linux/io.h>
-#include <linux/module.h>
-#include <linux/platform_device.h>
+#include <linux/of_address.h>
 #include <linux/spinlock.h>
 #include <linux/slab.h>
 
@@ -119,29 +123,28 @@ static const struct clk_ops rtl819x_pll_ops = {
 	.recalc_rate = rtl819x_pll_recalc_rate,
 };
 
-static struct clk_hw *rtl819x_register_pll(struct device *dev,
-					   void __iomem *base,
+/*
+ * The PLL takes no parent clock: its output is whatever the strap field selects
+ * out of rtl819x_pllsel_table[], and recalc_rate() never looks at a parent rate.
+ */
+static struct clk_hw *rtl819x_register_pll(void __iomem *base,
 					   const char *name)
 {
 	struct rtl819x_pll_hw *pll;
 	struct clk_init_data init = {};
 
-	pll = devm_kzalloc(dev, sizeof(*pll), GFP_KERNEL);
+	pll = kzalloc(sizeof(*pll), GFP_KERNEL);
 	if (!pll)
 		return ERR_PTR(-ENOMEM);
 
 	init.name = name;
 	init.ops = &rtl819x_pll_ops;
-	init.parent_data = (struct clk_parent_data[]) {
-		{ .fw_name = "xtal" },
-	};
-	init.num_parents = 1;
-	init.flags = 0;
+	init.num_parents = 0;
 
 	pll->base = base;
 	pll->hw.init = &init;
 
-	if (devm_clk_hw_register(dev, &pll->hw))
+	if (clk_hw_register(NULL, &pll->hw))
 		return ERR_PTR(-EINVAL);
 	return &pll->hw;
 }
@@ -186,14 +189,13 @@ static const struct clk_ops rtl819x_wlan_ops = {
 	.is_enabled = rtl819x_wlan_is_enabled,
 };
 
-static struct clk_hw *rtl819x_register_wlan_gate(struct device *dev,
-						 void __iomem *base,
+static struct clk_hw *rtl819x_register_wlan_gate(void __iomem *base,
 						 const char *name)
 {
 	struct rtl819x_wlan_hw *wlan;
 	struct clk_init_data init = {};
 
-	wlan = devm_kzalloc(dev, sizeof(*wlan), GFP_KERNEL);
+	wlan = kzalloc(sizeof(*wlan), GFP_KERNEL);
 	if (!wlan)
 		return ERR_PTR(-ENOMEM);
 
@@ -204,16 +206,15 @@ static struct clk_hw *rtl819x_register_wlan_gate(struct device *dev,
 	wlan->base = base;
 	wlan->hw.init = &init;
 
-	if (devm_clk_hw_register(dev, &wlan->hw))
+	if (clk_hw_register(NULL, &wlan->hw))
 		return ERR_PTR(-EINVAL);
 	return &wlan->hw;
 }
 
 static DEFINE_SPINLOCK(rtl819x_clk_lock);
 
-static int rtl819x_clk_probe(struct platform_device *pdev)
+static void __init rtl819x_clk_setup(struct device_node *np)
 {
-	struct device *dev = &pdev->dev;
 	struct clk_hw_onecell_data *clk_data;
 	struct clk_hw *lx_hw, *uart_hw, *spi_hw;
 	struct clk_hw *pll_hw, *cpu_div_hw, *cpu_hw;
@@ -222,83 +223,83 @@ static int rtl819x_clk_probe(struct platform_device *pdev)
 	static const char *const cpu_parents[] = { "cpu_div", "lx" };
 	static const char *cpu_div_parent = "pll";
 	void __iomem *base;
-	int ret;
 
-	base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(base))
-		return PTR_ERR(base);
+	base = of_iomap(np, 0);
+	if (!base) {
+		pr_err("clk: cannot map the system controller registers\n");
+		return;
+	}
 
 	/* Crystal rate, straight off the strap; the WLAN core needs it */
 	xtal_rate = readl(base + RTL819X_REG_HW_STRAP) & RTL819X_STRAP_XTAL_40MHZ ?
 		    RTL819X_XTAL_40MHZ : RTL819X_XTAL_25MHZ;
-	xtal_hw = devm_clk_hw_register_fixed_rate(dev, "wifi_ref", NULL, 0,
-						  xtal_rate);
+	xtal_hw = clk_hw_register_fixed_rate(NULL, "wifi_ref", NULL, 0,
+					     xtal_rate);
 	if (IS_ERR(xtal_hw))
-		return PTR_ERR(xtal_hw);
+		goto err_unmap;
 
 	/* WLAN clock/function gate; without it the core registers read 0 */
-	wlan_hw = rtl819x_register_wlan_gate(dev, base, "wlan");
+	wlan_hw = rtl819x_register_wlan_gate(base, "wlan");
 	if (IS_ERR(wlan_hw))
-		return PTR_ERR(wlan_hw);
+		goto err_unmap;
 
 	/* Fixed LX bus clock: no runtime programmable divider was found */
-	lx_hw = devm_clk_hw_register_fixed_rate(dev, "lx", NULL, 0,
-						RTL819X_LX_CLK_RATE);
+	lx_hw = clk_hw_register_fixed_rate(NULL, "lx", NULL, 0,
+					   RTL819X_LX_CLK_RATE);
 	if (IS_ERR(lx_hw))
-		return PTR_ERR(lx_hw);
+		goto err_unmap;
 
 	/*
 	 * Switch core gate, only meant to pulse the clock during the core
 	 * reset.  CLK_IGNORE_UNUSED lets the framework leave the core clocked
 	 * when no consumer holds a reference.
 	 */
-	swcore_hw = devm_clk_hw_register_gate(dev, "swcore", "lx",
-					      CLK_IGNORE_UNUSED,
-					      base + RTL819X_REG_SYS_CLK_MAG,
-					      ffs(RTL819X_SWCORE_EN) - 1, 0,
-					      &rtl819x_clk_lock);
+	swcore_hw = clk_hw_register_gate(NULL, "swcore", "lx",
+					 CLK_IGNORE_UNUSED,
+					 base + RTL819X_REG_SYS_CLK_MAG,
+					 ffs(RTL819X_SWCORE_EN) - 1, 0,
+					 &rtl819x_clk_lock);
 	if (IS_ERR(swcore_hw))
-		return PTR_ERR(swcore_hw);
+		goto err_unmap;
 
 	/* UART input clock: LX / 2 == 100 MHz in the vendor SDK setup */
-	uart_hw = devm_clk_hw_register_fixed_factor(dev, "uart", "lx", 0, 1, 2);
+	uart_hw = clk_hw_register_fixed_factor(NULL, "uart", "lx", 0, 1, 2);
 	if (IS_ERR(uart_hw))
-		return PTR_ERR(uart_hw);
+		goto err_unmap;
 
 	/* SPI NOR controller clock as set up by the bootloader */
-	spi_hw = devm_clk_hw_register_fixed_rate(dev, "spi", NULL, 0,
-						 RTL819X_SPI_CLK_RATE);
+	spi_hw = clk_hw_register_fixed_rate(NULL, "spi", NULL, 0,
+					    RTL819X_SPI_CLK_RATE);
 	if (IS_ERR(spi_hw))
-		return PTR_ERR(spi_hw);
+		goto err_unmap;
 
-	pll_hw = rtl819x_register_pll(dev, base, "pll");
+	pll_hw = rtl819x_register_pll(base, "pll");
 	if (IS_ERR(pll_hw))
-		return PTR_ERR(pll_hw);
+		goto err_unmap;
 
-	cpu_div_hw = devm_clk_hw_register_divider_table(dev, "cpu_div",
-							cpu_div_parent,
-							0,
-							base + RTL819X_REG_HW_STRAP,
-							RTL819X_STRAP_CPU_DIV_SHIFT,
-							RTL819X_STRAP_CPU_DIV_WIDTH,
-							CLK_DIVIDER_READ_ONLY,
-							rtl819x_cpu_div_table,
-							NULL);
+	cpu_div_hw = clk_hw_register_divider_table(NULL, "cpu_div",
+						   cpu_div_parent, 0,
+						   base + RTL819X_REG_HW_STRAP,
+						   RTL819X_STRAP_CPU_DIV_SHIFT,
+						   RTL819X_STRAP_CPU_DIV_WIDTH,
+						   CLK_DIVIDER_READ_ONLY,
+						   rtl819x_cpu_div_table, NULL);
 	if (IS_ERR(cpu_div_hw))
-		return PTR_ERR(cpu_div_hw);
+		goto err_unmap;
 
-	cpu_hw = devm_clk_hw_register_mux(dev, "cpu", cpu_parents, 2, 0,
-					  base + RTL819X_REG_HW_STRAP,
-					  ffs(RTL819X_STRAP_CPU_BYPASS) - 1,
-					  1, CLK_MUX_READ_ONLY, NULL);
+	cpu_hw = clk_hw_register_mux(NULL, "cpu", cpu_parents, 2, 0,
+				     base + RTL819X_REG_HW_STRAP,
+				     ffs(RTL819X_STRAP_CPU_BYPASS) - 1,
+				     1, CLK_MUX_READ_ONLY, NULL);
 	if (IS_ERR(cpu_hw))
-		return PTR_ERR(cpu_hw);
+		goto err_unmap;
 
-	clk_data = devm_kzalloc(dev, struct_size(clk_data, hws,
-						 RTL8197F_CLK_NR_CLKS),
-				GFP_KERNEL);
-	if (!clk_data)
-		return -ENOMEM;
+	clk_data = kzalloc(struct_size(clk_data, hws, RTL8197F_CLK_NR_CLKS),
+			   GFP_KERNEL);
+	if (!clk_data) {
+		pr_err("clk: cannot allocate the clock table\n");
+		goto err_unmap;
+	}
 
 	clk_data->num = RTL8197F_CLK_NR_CLKS;
 	clk_data->hws[RTL8197F_CLK_CPU] = cpu_hw;
@@ -309,30 +310,12 @@ static int rtl819x_clk_probe(struct platform_device *pdev)
 	clk_data->hws[RTL8197F_CLK_WIFI_REF] = xtal_hw;
 	clk_data->hws[RTL8197F_CLK_SWCORE] = swcore_hw;
 
-	ret = devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get,
-					  clk_data);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "failed to add clock provider\n");
+	if (of_clk_add_hw_provider(np, of_clk_hw_onecell_get, clk_data))
+		pr_err("clk: failed to add the clock provider\n");
+	return;
 
-	return 0;
+err_unmap:
+	iounmap(base);
 }
 
-static const struct of_device_id rtl819x_clk_of_match[] = {
-	{ .compatible = "realtek,rtl8197f-clock" },
-	{ /* sentinel */ }
-};
-MODULE_DEVICE_TABLE(of, rtl819x_clk_of_match);
-
-static struct platform_driver rtl819x_clk_driver = {
-	.probe = rtl819x_clk_probe,
-	.driver = {
-		.name = "realtek-rtl819x-clk",
-		.of_match_table = rtl819x_clk_of_match,
-	},
-};
-module_platform_driver(rtl819x_clk_driver);
-
-MODULE_AUTHOR("David Yang <mmyangfl@gmail.com>");
-MODULE_DESCRIPTION("Realtek RTL8197F SoC clock driver");
-MODULE_LICENSE("GPL");
+CLK_OF_DECLARE(rtl819x_clk, "realtek,rtl8197f-clock", rtl819x_clk_setup);

@@ -18,45 +18,23 @@
 			device_type = "cpu";
 			compatible = "mips,mips24KEc";
 			reg = <0>;
+			/*
+			 * Must be a clock that exists before any driver:
+			 * arch/mips/generic/init.c reads it right after
+			 * of_clk_init() to derive mips_hpt_frequency, and a
+			 * clock provided by the platform driver below is not
+			 * registered yet at that point.  The strap selects
+			 * between the PLL settings; this board is strapped for
+			 * 999 MHz.
+			 */
 			clocks = <&cpuclk>;
 		};
-	};
-
-	/*
-	 * Fixed-clock placeholders.  The RTL8197F derives these from the
-	 * 25 MHz crystal with strap-selectable PLL settings; the programmable
-	 * clock controller below replaces them.
-	 *
-	 * cpuclk is strap-dependent, not a family constant.
-	 */
-	xtal: clock-xtal {
-		compatible = "fixed-clock";
-		#clock-cells = <0>;
-		clock-frequency = <25000000>;
 	};
 
 	cpuclk: clock-cpu {
 		compatible = "fixed-clock";
 		#clock-cells = <0>;
 		clock-frequency = <999000000>;
-	};
-
-	lxclk: clock-lx {
-		compatible = "fixed-clock";
-		#clock-cells = <0>;
-		clock-frequency = <200000000>;
-	};
-
-	/*
-	 * System controller: CPU PLL/divider straps plus the WLAN
-	 * clock/function gate.  The reg range has to reach 0x64, where
-	 * that gate lives.
-	 */
-	sysclk: clock-controller@18000000 {
-		compatible = "realtek,rtl8197f-clock";
-		reg = <0x18000000 0x68>;
-		clocks = <&xtal>;
-		#clock-cells = <1>;
 	};
 
 	cpuintc: interrupt-controller {
@@ -73,8 +51,24 @@
 		ranges = <0x0 0x18000000 0x200000>;
 
 		syscon: syscon@0 {
-			compatible = "realtek,rtl8197f-syscon", "syscon";
+			compatible = "realtek,rtl8197f-syscon", "syscon",
+				     "simple-mfd";
 			reg = <0x0 0x200>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges = <0x0 0x0 0x200>;
+
+			/*
+			 * CPU PLL/divider straps, the crystal-select strap bit
+			 * and the WLAN and switch core clock gates.  The strap
+			 * register is at 0x08 and the WLAN gate at 0x64, so the
+			 * window has to reach 0x68.
+			 */
+			sysclk: clock-controller@0 {
+				compatible = "realtek,rtl8197f-clock";
+				reg = <0x0 0x68>;
+				#clock-cells = <1>;
+			};
 		};
 
 		intc: interrupt-controller@3000 {
@@ -99,7 +93,7 @@
 			compatible = "realtek,rtl8197f-uart";
 			reg = <0x147000 0x100>;
 			reg-shift = <2>;
-			clock-frequency = <100000000>;
+			clocks = <&sysclk RTL8197F_CLK_UART>;
 
 			interrupt-parent = <&intc>;
 			interrupts = <9 0>;
@@ -145,7 +139,7 @@
 			reg = <0x3100 0x20>;
 			interrupts = <7 0>;
 			interrupt-parent = <&intc>;
-			clocks = <&lxclk>;
+			clocks = <&sysclk RTL8197F_CLK_LX>;
 
 			status = "disabled";
 		};
@@ -153,7 +147,7 @@
 		wdt: watchdog@3118 {
 			compatible = "realtek,rtl8197f-wdt";
 			reg = <0x3118 0x8>;
-			clocks = <&lxclk>;
+			clocks = <&sysclk RTL8197F_CLK_LX>;
 
 			status = "disabled";
 		};
@@ -208,7 +202,7 @@
 			reg = <0x143000 0x1000>;
 			#address-cells = <1>;
 			#size-cells = <0>;
-			clocks = <&lxclk>;
+			clocks = <&sysclk RTL8197F_CLK_SPI>;
 
 			status = "disabled";
 		};

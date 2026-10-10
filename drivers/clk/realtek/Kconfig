@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
 config COMMON_CLK_REALTEK_RTL819X
-	tristate "Clock driver for Realtek RTL819x SoCs"
+	bool "Clock driver for Realtek RTL819x SoCs"
 	depends on MACH_REALTEK_RTL819X || COMPILE_TEST
 	default MACH_REALTEK_RTL819X
 	help
