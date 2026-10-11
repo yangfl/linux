@@ -1813,6 +1813,8 @@ void rtl8192f_rx_isr(struct rtl8192f_soc_priv *priv)
  * (PENDING_PERIOD, 8192cd.h:3427).
  */
 #define RTL8192F_TX_WATCH_STALLS	5
+/* Console heartbeat period, in watch passes (2 s each). */
+#define RTL8192F_TX_WATCH_BEATS		30
 
 /* Channel loading over a window, in microseconds.
  *
@@ -1878,6 +1880,114 @@ static unsigned int rtl8192f_channel_busy_us(struct rtl8192f_soc_priv *priv,
  * engine's consumer index, the lower half the one we published, so which
  * rings are behind and by how much is readable without arithmetic.
  */
+/* Name the 802.11 frame a published slot carries.
+ *
+ * Which frame class is jammed is part of what a halt means - one stubborn
+ * Action frame is a different fault from the queue having nothing it is
+ * allowed to send - and the raw descriptor bytes cannot say it.  The frame
+ * starts RTL8192F_TX_INFO_DESC_SIZE past skb->data, which is how the tx path
+ * lays the skb out (rtl8192f_tx_fill_desc()).
+ *
+ * The kernel's IEEE80211_STYPE_* are subtype fields without the type bits, so
+ * each case here has to carry its IEEE80211_FTYPE_* - IEEE80211_STYPE_RTS and
+ * IEEE80211_STYPE_AUTH are both 0x00b0 and only the type separates an RTS from
+ * an Authentication frame.  Anything unnamed still prints its raw fc.
+ */
+static const char *rtl8192f_frame_name(u16 fc)
+{
+	switch (fc & IEEE80211_FCTL_TYPE) {
+	case IEEE80211_STYPE_ASSOC_REQ:
+		return "assoc-req";
+	case IEEE80211_STYPE_ASSOC_RESP:
+		return "assoc-resp";
+	case IEEE80211_STYPE_REASSOC_REQ:
+		return "reassoc-req";
+	case IEEE80211_STYPE_REASSOC_RESP:
+		return "reassoc-resp";
+	case IEEE80211_STYPE_PROBE_REQ:
+		return "probe-req";
+	case IEEE80211_STYPE_PROBE_RESP:
+		return "probe-resp";
+	case IEEE80211_STYPE_DISASSOC:
+		return "disassoc";
+	case IEEE80211_STYPE_AUTH:
+		return "auth";
+	case IEEE80211_STYPE_DEAUTH:
+		return "deauth";
+	case IEEE80211_STYPE_ACTION:
+		return "action";
+	case IEEE80211_FTYPE_CTL | IEEE80211_STYPE_RTS:
+		return "rts";
+	case IEEE80211_FTYPE_CTL | IEEE80211_STYPE_CTS:
+		return "cts";
+	case IEEE80211_FTYPE_CTL | IEEE80211_STYPE_BACK:
+		return "block-ack";
+	case IEEE80211_FTYPE_CTL | IEEE80211_STYPE_BACK_REQ:
+		return "block-ack-req";
+	case IEEE80211_FTYPE_DATA | IEEE80211_STYPE_DATA:
+		return "data";
+	case IEEE80211_FTYPE_DATA | IEEE80211_STYPE_QOS_DATA:
+		return "qos-data";
+	case IEEE80211_FTYPE_DATA | IEEE80211_STYPE_NULLFUNC:
+		return "null";
+	case IEEE80211_FTYPE_DATA | IEEE80211_STYPE_QOS_NULLFUNC:
+		return "qos-null";
+	default:
+		return "unnamed";
+	}
+}
+
+/* The TX FIFO page ledger, one "name=free/owned" pair per priority queue.
+ * This is the reading that separates "the engine cannot fetch because it has
+ * no pages left" from "the engine has pages and still will not fetch": the
+ * first is a credit problem in the path that returns them, the second is not.
+ * Printed on every heartbeat as well, because a halt-time number only means
+ * something against a same-build baseline taken while the ring was served.
+ */
+static void rtl8192f_tx_page_ledger(struct rtl8192f_soc_priv *priv, char *buf,
+				    size_t size)
+{
+	static const char *const pq_name[REG_FIFOPAGE_NUM] = {
+		"hpq", "lpq", "npq", "epq", "pubq",
+	};
+	size_t off = 0;
+	int i;
+
+	for (i = 0; i < REG_FIFOPAGE_NUM; i++) {
+		u32 v = rtl8192f_read32(priv, REG_FIFOPAGE_INFO(i));
+
+		off += scnprintf(buf + off, size - off, " %s=%lu/%lu",
+				 pq_name[i], FIELD_GET(PQ_AVAL_PG, v),
+				 FIELD_GET(PQ_PG_CNT, v));
+	}
+}
+
+/* The other half of the same question: the page ledger says how many pages a
+ * queue has, these say what the hardware last wrote back about releasing them.
+ * txq is FWHW_TXQ_CTRL - bit20 is the gate that lets a boundary write set the
+ * free tail, bit22 the beacon-download gate the firmware download parks; both
+ * are read-modify-written from the beacon path, so the halt and the heartbeat
+ * record what they actually hold.  free_tail is the CPU management queue's
+ * report of how far the in-core scheduler has finished with the buffer, and
+ * bcn_head is the beacon header page that bit22 lets the hardware rewrite.
+ * req is the TXREQ clear-disable gate (0x0523) and clk the in-core CPU clock
+ * bit (0x0008 bit14); rtl8192f_txrx_start() re-arms both on every open, so a
+ * ring that is published and never fetched while req has lost its 0x80, or
+ * while clk lacks bit14, names whoever switched the gate off behind us.
+ */
+static void rtl8192f_tx_tail_state(struct rtl8192f_soc_priv *priv, char *buf,
+				   size_t size)
+{
+	scnprintf(buf, size,
+		  " txq=0x%08x free_tail=0x%03lx bcn_head=0x%04x req=0x%02x clk=0x%08x",
+		  rtl8192f_read32(priv, REG_FWHW_TXQ_CTRL),
+		  FIELD_GET(FW_FREE_TAIL,
+			    rtl8192f_read32(priv, REG_CPU_MGQ_INFO)),
+		  rtl8192f_read16(priv, REG_FIFOPAGE_CTRL_2),
+		  rtl8192f_read8(priv, REG_DIS_TXREQ_CLR),
+		  rtl8192f_read32(priv, REG_SYS_CLK_CTRL));
+}
+
 static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
 				    u32 rp)
 {
@@ -1891,7 +2001,12 @@ static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
 			    RTL8192F_NUM_TX_DESC;
 	bool have_desc = false, slot_ok, busy_valid;
 	char line[160];
-	int off, ret;
+	char pages[80];
+	char pend[80];
+	char tail[96];
+	size_t poff = 0;
+	int off, ret, n;
+	u32 i;
 	u8 q;
 
 	slot_ok = rp < RTL8192F_NUM_TX_DESC;
@@ -1903,19 +2018,63 @@ static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
 		off += scnprintf(line + off, sizeof(line) - off, " %s=0x%08x",
 				 priv->tx_ring[q].name,
 				 rtl8192f_read32(priv, queue_regs_tbl[q].idx));
+		poff += scnprintf(pend + poff, sizeof(pend) - poff, " %s=%u",
+				  priv->tx_ring[q].name,
+				  (priv->tx_ring[q].head - priv->tx_ring[q].tail) &
+				  (RTL8192F_NUM_TX_DESC - 1));
 	}
 	dev_err(dev, "%s\n", line);
 
-	dev_err(dev,
-		"tx halt: pause=0x%02x cr=0x%04x txdma=0x%x rxdma=0x%x hisr=0x%08x/0x%08x fwisr=0x%x rxidx=0x%08x\n",
+	dev_err(dev, "tx halt: pause=0x%02x cr=0x%04x txdma=0x%x rxdma=0x%x\n",
 		rtl8192f_read8(priv, REG_TXPAUSE),
 		rtl8192f_read16(priv, REG_CR),
 		rtl8192f_read32(priv, REG_TXDMA_STATUS),
-		rtl8192f_read32(priv, REG_RXDMA_STATUS),
+		rtl8192f_read32(priv, REG_RXDMA_STATUS));
+	dev_err(dev, "tx halt: hisr=0x%08x/0x%08x fwisr=0x%x rxidx=0x%08x\n",
 		rtl8192f_read32(priv, REG_HISR0),
 		rtl8192f_read32(priv, REG_HISR1),
 		rtl8192f_read32(priv, REG_FWISR),
 		rtl8192f_read32(priv, REG_RXQ_RXBD_IDX));
+	rtl8192f_tx_page_ledger(priv, pages, sizeof(pages));
+	dev_err(dev, "tx halt pages:%s\n", pages);
+	dev_err(dev, "tx halt pending:%s\n", pend);
+	rtl8192f_tx_tail_state(priv, tail, sizeof(tail));
+	dev_err(dev, "tx halt tail:%s\n", tail);
+
+	/* Two more questions the line above cannot answer.
+	 *
+	 * Interrupt masks: our own header records that the per-AC TX-done
+	 * bits have to stay out of HIMR0 because the in-core scheduler
+	 * consumes them, and the ISR's RDU workaround reaches that register
+	 * with a read-modify-write that a concurrent mask update could undo.
+	 * So name the TX-done bits here instead of making a reader decode 0xfc.
+	 *
+	 * Queue configuration: ring lengths, the queue map and the beacon
+	 * engine are what the TX path needs intact to make progress; this is
+	 * what they hold at the moment the fetch stopped.  The values we
+	 * program live in rtl8192f_txrx_start() and hw.c.
+	 */
+	dev_err(dev, "tx halt irq: himr0=0x%08x himr1=0x%08x%s\n",
+		rtl8192f_read32(priv, REG_HIMR0),
+		rtl8192f_read32(priv, REG_HIMR1),
+		(rtl8192f_read32(priv, REG_HIMR0) & RTL8192F_TX_DONE_MASK) ?
+			" (TX-DONE BITS ENABLED)" : "");
+	dev_err(dev,
+		"tx halt ringlen: mgnt=0x%04x rx=0x%04x vo=0x%04x vi=0x%04x be=0x%04x bk=0x%04x hi=0x%04x\n",
+		rtl8192f_read16(priv, REG_MGQ_TXBD_NUM),
+		rtl8192f_read16(priv, REG_RX_RXBD_NUM),
+		rtl8192f_read16(priv, REG_VOQ_TXBD_NUM),
+		rtl8192f_read16(priv, REG_VIQ_TXBD_NUM),
+		rtl8192f_read16(priv, REG_BEQ_TXBD_NUM),
+		rtl8192f_read16(priv, REG_BKQ_TXBD_NUM),
+		rtl8192f_read16(priv, REG_HI0Q_TXBD_NUM));
+	dev_err(dev,
+		"tx halt queue: map=0x%04x rwpclr=0x%08x retry=0x%02x bcn=0x%08x tbtt=0x%08x\n",
+		rtl8192f_read16(priv, REG_TRXDMA_CTRL),
+		rtl8192f_read32(priv, REG_BD_RWPTR_CLR),
+		rtl8192f_read8(priv, REG_RETRY_LIMIT),
+		rtl8192f_read32(priv, REG_BCN_CTRL),
+		rtl8192f_read32(priv, REG_MBSSID_BCN_SPACE));
 
 	/* Copy the descriptor bytes under the lock the reaper uses, and print
 	 * them after it: the liveness question below sleeps, and the skb this
@@ -1956,6 +2115,61 @@ static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
 			rp, (int)sizeof(stuck_bd), &stuck_bd);
 	dev_err(dev, "tx halt: last consumed slot %u txbd %*ph\n", last,
 		(int)sizeof(last_bd), &last_bd);
+
+	/* The engine stopped at rp, but what matters is the class of frame it
+	 * will not take, so name the whole unpublished run rather than one
+	 * slot.  Four is enough to tell "one stubborn frame" from "everything
+	 * on this queue"; the skbs are stable because the reaper needs the
+	 * same lock this runs under.
+	 */
+	i = rp;
+	for (n = 0; n < 4 && i != (ring->head & (RTL8192F_NUM_TX_DESC - 1));
+	     n++) {
+		struct sk_buff *skb = ring->info[i].skb;
+		u16 fc;
+
+		if (!skb || skb->len <= RTL8192F_TX_INFO_DESC_SIZE + 1) {
+			dev_err(dev, "tx halt: slot %u has no frame to name\n",
+				i);
+			break;
+		}
+
+		fc = get_unaligned_le16(skb->data +
+					RTL8192F_TX_INFO_DESC_SIZE);
+		dev_err(dev, "tx halt: slot %u holds %s (fc 0x%04x, %u B)\n",
+			i, rtl8192f_frame_name(fc), fc,
+			skb->len - RTL8192F_TX_INFO_DESC_SIZE);
+		i = (i + 1) & (RTL8192F_NUM_TX_DESC - 1);
+	}
+}
+
+/* Name the latched AXI causes instead of printing a mask nobody can decode
+ * off a log line.  Bit order is halmac_bit2.h:32851-32856 (CS[5:0]).
+ */
+static void rtl8192f_axi_causes_str(u32 causes, char *out, size_t len)
+{
+	static const struct {
+		u32 bit;
+		const char *name;
+	} names[] = {
+		{ BIT(0), "slverr-r" },
+		{ BIT(1), "slverr-w" },
+		{ BIT(2), "decerr-r" },
+		{ BIT(3), "decerr-w" },
+		{ BIT(4), "txdma-timeout" },
+		{ BIT(5), "rxdma-timeout" },
+	};
+	size_t n = 0;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
+		if (!(causes & names[i].bit))
+			continue;
+		n += scnprintf(out + n, len - n, "%s%s", n ? "," : "",
+			       names[i].name);
+	}
+	if (!n)
+		scnprintf(out, len, "none");
 }
 
 /* Minimum spacing between two recovery restarts.
@@ -2017,15 +2231,100 @@ void rtl8192f_tx_watch(struct work_struct *work)
 		container_of(to_delayed_work(work), struct rtl8192f_soc_priv,
 			     tx_watch);
 	unsigned long flags;
+	char causes_str[48];
+	char pages[80];
+	char tail[96];
+	char pend[80];
+	size_t pend_off;
+	bool armed = false, beat;
 	int stalled = -1;
 	int alive = 0;
+	int armed_q = -1;
+	u32 cs, axi_time, causes;
+	u32 be_idx, hisr0, hisr1;
 	u32 stalled_pending = 0, stalled_rp = 0;
+	u32 armed_stall = 0, armed_pend = 0, armed_rp = 0, armed_wp = 0;
 	u32 q;
 
 	if (!READ_ONCE(priv->running))
 		return;
 
+	/* Once any ring is being counted as stalled this tick is worth
+	 * bracketing: if the board dies inside a wifi MMIO read, the "pre"
+	 * line is the last thing the console ever gets, and that is the only
+	 * observation from this side that separates "the bus stopped answering"
+	 * from "the transmitter just stopped making progress".
+	 */
+	for (q = 0; q < Q_NUM; q++)
+		if (priv->tx_stall[q])
+			armed = true;
+
+	/* The same bracket is worth it every beat, not only when a ring is
+	 * flagged: measured here is a whole-SoC stop that raises no halt at all,
+	 * takes the console with it, and is only reported afterwards by the
+	 * boot code as a watchdog reset.  The last line before such a death is
+	 * the whole measurement, so the reads that could be at fault have to
+	 * sit between a printed "pre" and a printed answer.
+	 */
+	priv->tx_ticks++;
+	beat = !(priv->tx_ticks % RTL8192F_TX_WATCH_BEATS);
+	if (beat)
+		dev_warn(&priv->pdev->dev, "tx watch: beat tick=%u\n",
+			 priv->tx_ticks);
+
+	if (beat) {
+		be_idx = rtl8192f_read32(priv, queue_regs_tbl[Q_BE].idx);
+		/* Read only, never written back: HISR1 is write-1-to-clear and
+		 * the ISR has its own handling for these bits, so clearing one
+		 * here would swallow an event.  A read still answers the
+		 * question - a FIFO overflow that latched and stayed is exactly
+		 * the unhandled case.
+		 */
+		hisr1 = rtl8192f_read32(priv, REG_HISR1);
+		/* HISR0 is different: the ISR only writes back the bits it
+		 * claims (RTL8192F_HIMR0_INT_MASK), so every other latch in
+		 * this word is never cleared by anyone and the word is a
+		 * history of the whole boot rather than a reading of the
+		 * moment.  Clearing exactly the bits no host path consumes is
+		 * what makes the halt-time value an event - it then says "this
+		 * latched since the last heartbeat", which is the only window
+		 * comparable with the ring state.
+		 *
+		 * The TX-done bits are not among them: the ISR decides whether
+		 * to reap from them (core.c), so clearing one between two
+		 * interrupts would drop a reclaim and could itself stop the
+		 * ring - the failure this work is looking for.
+		 */
+		hisr0 = rtl8192f_read32(priv, REG_HISR0);
+		rtl8192f_write32(priv, REG_HISR0,
+				 hisr0 & ~(RTL8192F_HIMR0_INT_MASK |
+					   RTL8192F_TX_DONE_MASK));
+		rtl8192f_tx_page_ledger(priv, pages, sizeof(pages));
+		rtl8192f_tx_tail_state(priv, tail, sizeof(tail));
+	}
+
+	if (armed)
+		dev_emerg(&priv->pdev->dev, "tx watch: pre\n");
+
+	/* The 8197F latches its AXI bus exceptions here: CS bits[5:0] are
+	 * SLVERR and DECERR on read and write plus the TXDMA and RXDMA
+	 * timeouts, and 0x1354 holds the two timeout values the master uses
+	 * to produce them (halmac_bit2.h:32849-32885).  The vendor driver
+	 * never reads either, so this is the only place that asks the block
+	 * whether it saw a bus fault rather than merely stopped.
+	 */
+	cs = rtl8192f_read32(priv, REG_AXI_EXCEPT_CS);
+	axi_time = rtl8192f_read32(priv, REG_AXI_EXCEPT_TIME);
+	causes = cs & AXI_CAUSE_MASK;
+	if (armed || causes) {
+		rtl8192f_axi_causes_str(causes, causes_str, sizeof(causes_str));
+		dev_err(&priv->pdev->dev,
+			"tx watch: axi cs=0x%08x time=0x%08x causes=%s\n",
+			cs, axi_time, causes_str);
+	}
+
 	spin_lock_irqsave(&priv->irq_lock, flags);
+	pend_off = 0;
 	for (q = 0; q < Q_NUM; q++) {
 		const struct rtl8192f_queue_regs *qr = &queue_regs_tbl[q];
 		struct rtl8192f_tx_ring *ring = &priv->tx_ring[q];
@@ -2033,6 +2332,18 @@ void rtl8192f_tx_watch(struct work_struct *work)
 
 		if (q == Q_BEACON)
 			continue;	/* not a host-advanced ring */
+
+		/* What each ring still owes the engine, counted from our own
+		 * pointers rather than from the index pair: the FIFO page
+		 * ledger alone cannot tell queued work from a credit that was
+		 * never returned, and only the second case can be the halt.
+		 */
+		if (beat)
+			pend_off += scnprintf(pend + pend_off,
+					      sizeof(pend) - pend_off, " %s=%u",
+					      ring->name,
+					      (ring->head - ring->tail) &
+					      (RTL8192F_NUM_TX_DESC - 1));
 
 		if (ring->head == ring->tail) {
 			priv->tx_stall[q] = 0;
@@ -2073,6 +2384,13 @@ void rtl8192f_tx_watch(struct work_struct *work)
 			stalled_pending = (ring->head - ring->tail) &
 					  (RTL8192F_NUM_TX_DESC - 1);
 			stalled_rp = rp;
+		} else if (priv->tx_stall[q]) {
+			armed_q = q;
+			armed_stall = priv->tx_stall[q];
+			armed_pend = (ring->head - ring->tail) &
+				     (RTL8192F_NUM_TX_DESC - 1);
+			armed_rp = rp;
+			armed_wp = idx & TXBD_NUM_MASK;
 		}
 	}
 
@@ -2085,6 +2403,62 @@ void rtl8192f_tx_watch(struct work_struct *work)
 		stalled = -1;
 	}
 	spin_unlock_irqrestore(&priv->irq_lock, flags);
+
+	if (armed_q >= 0) {
+		/* The four passes before a declaration are the ones no dump ever
+		 * covered: they say whether the ring's pages ran out and stayed
+		 * out (a queue that cannot be given a page) or whether pages were
+		 * available the whole time (a fetch that stopped being asked), and
+		 * whether the published/read pair already disagreed with our own
+		 * count before the ring was declared hung.  Printed even when the
+		 * rule above masked it, because a stall cleared by another queue
+		 * is itself a fact.
+		 */
+		rtl8192f_tx_page_ledger(priv, pages, sizeof(pages));
+		rtl8192f_tx_tail_state(priv, tail, sizeof(tail));
+		dev_warn(&priv->pdev->dev,
+			 "tx watch: armed %s stall=%u pend=%u rp=%u wp=%u pages:%s%s\n",
+			 priv->tx_ring[armed_q].name, armed_stall, armed_pend,
+			 armed_rp, armed_wp, pages, tail);
+	}
+
+	if (armed)
+		dev_emerg(&priv->pdev->dev, "tx watch: post\n");
+
+	/* Channel loading, sampled on every pass and accumulated until the
+	 * next heartbeat.  The halt report reads this itself, but by then the
+	 * engine has already been stopped for RTL8192F_TX_WATCH_STALLS passes
+	 * and the peer has usually given up, so that single number says what
+	 * the air was like after the damage; sampled per pass it says what the
+	 * air was like while the ring was still being served.
+	 */
+	{
+		bool load_valid;
+		u32 busy = rtl8192f_channel_busy_us(priv, 60000, &load_valid);
+
+		if (load_valid) {
+			priv->tx_busy_samples++;
+			if (busy > priv->tx_busy_max_us)
+				priv->tx_busy_max_us = busy;
+		}
+	}
+
+	if (beat) {
+		dev_warn(&priv->pdev->dev,
+			 "tx watch alive: tick=%u be=0x%08x cr=0x%04x hisr1=0x%08x busy=%u/%u\n",
+			 priv->tx_ticks, be_idx,
+			 rtl8192f_read16(priv, REG_CR), hisr1,
+			 priv->tx_busy_max_us, priv->tx_busy_samples);
+		/* Split so neither line has to be abbreviated: the ledger is
+		 * the comparison partner of the halt report's own page line,
+		 * and hisr0 here is "latched since the previous heartbeat".
+		 */
+		dev_warn(&priv->pdev->dev,
+			 "tx watch pages:%s hisr0=0x%08x\n", pages, hisr0);
+		dev_warn(&priv->pdev->dev, "tx watch pend:%s%s\n", pend, tail);
+		priv->tx_busy_max_us = 0;
+		priv->tx_busy_samples = 0;
+	}
 
 	if (stalled < 0) {
 		schedule_delayed_work(&priv->tx_watch,
@@ -2103,7 +2477,36 @@ void rtl8192f_tx_watch(struct work_struct *work)
 
 void rtl8192f_tx_watch_start(struct rtl8192f_soc_priv *priv)
 {
+	char causes_str[48];
+	u32 cs = rtl8192f_read32(priv, REG_AXI_EXCEPT_CS);
+	u32 time = rtl8192f_read32(priv, REG_AXI_EXCEPT_TIME);
+	u32 txto = FIELD_GET(GENMASK(11, 0), time);
+	u32 rxto = FIELD_GET(GENMASK(23, 12), time);
+	u32 rec = FIELD_GET(GENMASK(31, 24), time);
+
 	memset(priv->tx_stall, 0, sizeof(priv->tx_stall));
+	/* Baseline for the AXI probe, and the answer to "is the timeout
+	 * mechanism armed at all on this part": TIME bits[11:0] and [23:12]
+	 * are the TXDMA/RXDMA timeout values, bits[31:24] the recovery time.
+	 * The vendor tree writes none of them, so whatever the boot code left
+	 * is what the silicon runs on.
+	 */
+	rtl8192f_axi_causes_str(cs & AXI_CAUSE_MASK, causes_str,
+				sizeof(causes_str));
+	dev_info(&priv->pdev->dev,
+		 "axi: cs=0x%08x (%s) time=0x%08x txto=%u rxto=%u rec=%u\n", cs,
+		 causes_str, time, txto, rxto, rec);
+	/* The healthy reference for the lines the halt report prints, so a
+	 * stall can be read as a difference rather than as bare hex.
+	 */
+	dev_info(&priv->pdev->dev,
+		 "tx cfg: himr0=0x%08x map=0x%04x be=0x%04x retry=0x%02x bcn=0x%08x tbtt=0x%08x\n",
+		 rtl8192f_read32(priv, REG_HIMR0),
+		 rtl8192f_read16(priv, REG_TRXDMA_CTRL),
+		 rtl8192f_read16(priv, REG_BEQ_TXBD_NUM),
+		 rtl8192f_read8(priv, REG_RETRY_LIMIT),
+		 rtl8192f_read32(priv, REG_BCN_CTRL),
+		 rtl8192f_read32(priv, REG_MBSSID_BCN_SPACE));
 	schedule_delayed_work(&priv->tx_watch, RTL8192F_TX_WATCH_PERIOD);
 }
 

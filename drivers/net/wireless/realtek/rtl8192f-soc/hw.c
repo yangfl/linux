@@ -620,7 +620,6 @@ static void rtl8192f_apply_rf_table(struct rtl8192f_soc_priv *priv,
  * it no TX queue owns any FIFO pages and the first transmitted frame
  * raises TX FIFO overflow (TXFOVW).
  */
-#define REG_FIFOPAGE_INFO(i)	(0x0230 + ((i) * 4))
 #define REG_RQPN_CTRL_2		0x022c	/* trigger byte at +3 */
 #define REG_AUTO_LLT		0x0208
 #define REG_FWHW_TXQ_CTRL	0x0420

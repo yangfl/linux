@@ -178,11 +178,16 @@
 #define REG_HMETFR			0x01CC
 #define REG_HMEBOX(n)			(0x01D0 + (n) * 4)
 #define REG_HMEBOX_EXT(n)		(0x01F0 + (n) * 4)
-/* AXI bus exception cause / timestamp (8197F only, halmac_reg2.h
- * 2683-2684, bits halmac_bit2.h 32849-32885: DECERR/SLVERR R/W and
- * AXI_RXDMA_TIMEOUT).  Vendor never reads them; a non-zero value here
- * names the bus master and address that wedged the SoC.
+/* AXI bus exception cause / timestamp, 8197F only (halmac_reg2.h
+ * 2683-2684 REG_AXI_EXCEPT_CS/_TIME, fields halmac_bit2.h 32849-32885:
+ * CS bits[5:0] are the latched causes - SLVERR on read/write, DECERR on
+ * read/write, TXDMA and RXDMA timeout - bits[13:8] gate their interrupts,
+ * and TIME carries the two 12-bit timeout values plus an 8-bit recovery
+ * time.  The vendor tree never reads either register.
  */
+#define REG_AXI_EXCEPT_CS		0x1350
+#define REG_AXI_EXCEPT_TIME		0x1354
+#define AXI_CAUSE_MASK			0x3f	/* CS[5:0]: the six latched causes */
 #define REG_TXDMA_OFFSET_CHK		0x020C
 #define REG_RXDMA_STATUS		0x0288
 #define REG_RXDMA_MODE		0x0290
@@ -285,6 +290,42 @@
  * arbitrated away and never grants TXREQ (pages never drain).
  */
 #define REG_DIS_TXREQ_CLR		0x0523
+/* TX FIFO page ledger, one word per priority queue (halmac_reg2.h:823-831,
+ * guarded for HALMAC_8197F_SUPPORT; fields in halmac_bit2.h 17639-17720):
+ * bits 11:0 are the pages assigned to that queue - the same value
+ * rtl8192f_hw_fifo_init() writes at bring-up - and bits 27:16 are the vendor's
+ * *_AVAL_PG_V1, how many of them are available right now.  So a drained queue
+ * reads available == assigned and a starved one reads available == 0.  Which AC
+ * lands in which queue is what REG_TRXDMA_CTRL's map says: on this board VO+BE
+ * share NPQ and VI+BK share LPQ, MGQ takes EPQ and HIQ takes HPQ
+ * (Hal88XXGen.c 4761-4768, 8197F branch, whose comments name exactly that).
+ * Mainline rtw88 asks the same question of a different pair of registers -
+ * REG_RQPN (0x0200, reserved) against REG_FIFOPAGE_CTRL_2 (0x0204, available),
+ * drained when they are equal (mac.c __rtw_mac_flush_prio_queue).
+ */
+#define REG_FIFOPAGE_INFO(i)		(0x0230 + ((i) * 4))
+#define REG_FIFOPAGE_NUM		5
+#define PQ_PG_CNT			GENMASK(11, 0)
+#define PQ_AVAL_PG			GENMASK(27, 16)
+/* The page the beacon queue's header starts on (halmac_reg2.h:738
+ * REG_FIFOPAGE_CTRL_2; rtw88 reg.h:322).  With FWHW_TXQ_CTRL bit22 set the
+ * hardware rewrites this word from its own "tx free tail" as pages are
+ * released, so the value a driver put there is only good until the next
+ * release - which is why the firmware download parks bit22 first
+ * (rtl8192f_fw.c).  Read back, it says whether that rewrite happened while a
+ * halt was up.
+ */
+#define REG_FIFOPAGE_CTRL_2		0x0204
+/* CPU management-queue information (halmac_reg2.h:1160).  Bits 11:0 are
+ * BIT_FW_FREE_TAIL_V1 (halmac_bit2.h 20910-20916, in the block guarded for
+ * HALMAC_8197F_SUPPORT); the older generation's comment names the register
+ * "TXPKTBUF Packet Empty" (8192c_reg.h:189).  It is the tail the in-core
+ * scheduler has finished with, and the vendor tree has no reader for it, so
+ * it is the only place that can answer "did the page credit stop coming back"
+ * as opposed to "did the engine stop asking".
+ */
+#define REG_CPU_MGQ_INFO		0x041C
+#define FW_FREE_TAIL			GENMASK(11, 0)
 /* Channel loading measurement: the BBP times CCA-busy itself over a window
  * the host programs in 4 us units, arms it through 0x890 (reset, then arm,
  * then start) and leaves the count in 0x8d0 with 0x8b4 bit16 as the valid
@@ -964,6 +1005,19 @@ struct rtl8192f_soc_priv {
 	u8 tx_stall[Q_NUM];
 	u32 tx_recoveries;
 	unsigned long tx_last_recover;
+
+	/* Watch passes since the ring was (re)armed.  Every
+	 * RTL8192F_TX_WATCH_BEATS of them the work prints a console line, so
+	 * that a board which dies without a word - the silent, watchdog-ended
+	 * case - leaves a gap that names the pass which never finished.
+	 */
+	u32 tx_ticks;
+	/* Channel loading seen by the BBP, accumulated over one heartbeat
+	 * interval: the busiest sample and how many samples it is over
+	 * (see rtl8192f_tx_watch()).
+	 */
+	u32 tx_busy_max_us;
+	u32 tx_busy_samples;
 
 	bool hw_ready;
 	bool running;
