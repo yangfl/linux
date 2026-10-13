@@ -521,13 +521,12 @@ out:
  *
  * The vendor waits on the REG_HMETFR box-full bit
  * (CheckFwReadLastH2C88XX, Hal88XXFirmware.c 2356-2370) because on its
- * chips the scheduler clears it after reading the box.  On the 8197F that
- * bit is useless: it reads 0xf from boot and never drops, while the box
- * itself still holds the command we wrote (0x1d0 read back
- * 0x40810140 on the board) and REG_FWISR's FS_H2CCMD bit re-asserts
- * on every box write
- * and stays clear if nothing is written.  So the command does reach the
- * firmware and FWISR is the only acknowledgment this part produces.
+ * chips the scheduler clears it after reading the box.  That bit moves here
+ * too, but it is not a usable gate for us: a box is reused before the flag
+ * of the previous command has necessarily fallen, so waiting for "the bit I
+ * just set went away" would race our own rotation.  REG_FWISR's FS_H2CCMD
+ * bit, by contrast, re-asserts on every box write and stays clear while
+ * nothing is written, which is what this loop polls.
  *
  * Budget is the vendor's 1200 polls of 10 us (FillH2CCmd88XX
  * Hal88XXFirmware.c 2446-2468).

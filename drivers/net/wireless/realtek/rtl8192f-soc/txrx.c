@@ -1978,14 +1978,22 @@ static void rtl8192f_tx_page_ledger(struct rtl8192f_soc_priv *priv, char *buf,
 static void rtl8192f_tx_tail_state(struct rtl8192f_soc_priv *priv, char *buf,
 				   size_t size)
 {
-	scnprintf(buf, size,
-		  " txq=0x%08x free_tail=0x%03lx bcn_head=0x%04x req=0x%02x clk=0x%08x",
-		  rtl8192f_read32(priv, REG_FWHW_TXQ_CTRL),
-		  FIELD_GET(FW_FREE_TAIL,
-			    rtl8192f_read32(priv, REG_CPU_MGQ_INFO)),
-		  rtl8192f_read16(priv, REG_FIFOPAGE_CTRL_2),
+	int n;
+
+	n = scnprintf(buf, size, " txq=%#010x hci=%#010x ftail=%#06lx bcn=%#08x",
+		      rtl8192f_read32(priv, REG_FWHW_TXQ_CTRL),
+		      rtl8192f_read32(priv, REG_HCI_CTRL),
+		      FIELD_GET(FW_FREE_TAIL,
+				rtl8192f_read32(priv, REG_CPU_MGQ_INFO)),
+		      rtl8192f_read16(priv, REG_FIFOPAGE_CTRL_2));
+	scnprintf(buf + n, size - n,
+		  " req=%#06x clk=%#010x txdma=%#010x sleep=%#010x rel=%#010x metfr=%#06x",
 		  rtl8192f_read8(priv, REG_DIS_TXREQ_CLR),
-		  rtl8192f_read32(priv, REG_SYS_CLK_CTRL));
+		  rtl8192f_read32(priv, REG_SYS_CLK_CTRL),
+		  rtl8192f_read32(priv, REG_TXDMA_OFFSET_CHK),
+		  rtl8192f_read32(priv, REG_MACID_SLEEP),
+		  rtl8192f_read32(priv, REG_MACID_RELEASE0),
+		  rtl8192f_read8(priv, REG_HMETFR));
 }
 
 static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
@@ -2003,7 +2011,7 @@ static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
 	char line[160];
 	char pages[80];
 	char pend[80];
-	char tail[96];
+	char tail[160];
 	size_t poff = 0;
 	int off, ret, n;
 	u32 i;
@@ -2105,14 +2113,35 @@ static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
 		return;
 	}
 
-	if (have_desc)
+	if (have_desc) {
+		u32 w1 = get_unaligned_le32(stuck_desc + 4);
+		u32 w4 = get_unaligned_le32(stuck_desc + 16);
+
 		dev_err(dev, "tx halt: stalled slot %u txbd %*ph desc %*ph\n",
 			slot, (int)sizeof(stuck_bd), &stuck_bd,
 			(unsigned int)sizeof(stuck_desc), stuck_desc);
-	else
+		/* Who the held frame is aimed at, read out of the descriptor the
+		 * driver wrote: the parks have covered unicast and group, both
+		 * security settings and both aggregation states, so the next
+		 * question is whether they all share a macid or a programmed
+		 * rate.
+		 */
+		dev_err(dev, "tx halt: stuck frame macid=%lu qsel=%lu rate=%lu\n",
+			FIELD_GET(TXD_W1_MACID, w1),
+			FIELD_GET(TXD_W1_QSEL, w1),
+			FIELD_GET(TXD_W4_DATARATE, w4));
+	} else {
 		dev_err(dev,
 			"tx halt: stalled slot %u txbd %*ph, no skb in it\n",
 			slot, (int)sizeof(stuck_bd), &stuck_bd);
+	}
+	dev_err(dev,
+		"tx halt: h2c metfr=0x%02x boxes 0x%08x 0x%08x 0x%08x 0x%08x\n",
+		rtl8192f_read8(priv, REG_HMETFR),
+		rtl8192f_read32(priv, REG_HMEBOX(0)),
+		rtl8192f_read32(priv, REG_HMEBOX(1)),
+		rtl8192f_read32(priv, REG_HMEBOX(2)),
+		rtl8192f_read32(priv, REG_HMEBOX(3)));
 	dev_err(dev, "tx halt: last consumed slot %u txbd %*ph\n", last,
 		(int)sizeof(last_bd), &last_bd);
 
@@ -2236,7 +2265,7 @@ void rtl8192f_tx_watch(struct work_struct *work)
 	unsigned long flags;
 	char causes_str[48];
 	char pages[80];
-	char tail[96];
+	char tail[160];
 	char pend[80];
 	size_t pend_off;
 	bool armed = false, beat;

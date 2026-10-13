@@ -189,9 +189,32 @@
 #define REG_AXI_EXCEPT_TIME		0x1354
 #define AXI_CAUSE_MASK			0x3f	/* CS[5:0]: the six latched causes */
 #define REG_TXDMA_OFFSET_CHK		0x020C
+/* Fields of 0x020C (halmac_bit2.h 17202-17208, live for
+ * HALMAC_8197F_SUPPORT).  b12/b11 are *not* self-clearing: leaving
+ * them set holds the TX engine (measured: every read after an RMW-set
+ * returned them set, the fetch pointers re-anchored, and beacons
+ * started reporting TX errors) - so they are not a stall recovery.
+ * b9 is what mainline rtw88 sets in rtw88xxa_power_on(); this part
+ * leaves it clear, as the 8192cd vendor does off its USB path.
+ */
 #define REG_RXDMA_STATUS		0x0288
 #define REG_RXDMA_MODE		0x0290
 #define REG_SYS_CFG			0x00F0
+/* Per-MACID "this station is dozing, its downlink is held" bitmap: macid
+ * 0..31 live in this word (the vendor's next regions are 0x04D0, 0x0484 and
+ * 0x0488 - HalCfg.h 706-708, SetMACIDSleep88XX Hal88XXGen.c 6908-6945).
+ * Its partner REG_MACID_RELEASE0 is a handshake: the driver sets the bit of
+ * the macid it wants served one packet and waits for the hardware to clear
+ * it (ReleaseOnePacket88XX, Hal88XXGen.c 6531-6550), and the RX path does
+ * that on this part (8192cd_rx.c 11229-11241, the branch listing
+ * VERSION_8197F).  This driver marks no macid asleep and never releases one
+ * - mac80211 buffers for dozing stations in software instead - so both
+ * words are read on every watch pass and every halt, to see whether the
+ * hardware is doing it by itself.
+ */
+#define REG_MACID_SLEEP			0x04D4
+#define REG_MACID_RELEASE0			0x1434
+#define REG_MACID_RELEASE_SETTING		0x1444
 
 /* ------------------------------------------------------------------ */
 /* 88XX "new BD" ring registers (0x300 block).  All offsets per vendor */
