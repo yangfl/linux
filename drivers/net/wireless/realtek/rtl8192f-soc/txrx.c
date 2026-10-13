@@ -1989,7 +1989,7 @@ static void rtl8192f_tx_tail_state(struct rtl8192f_soc_priv *priv, char *buf,
 }
 
 static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
-				    u32 rp)
+				    u32 slot)
 {
 	struct rtl8192f_tx_ring *ring = &priv->tx_ring[stalled];
 	struct device *dev = &priv->pdev->dev;
@@ -2009,7 +2009,7 @@ static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
 	u32 i;
 	u8 q;
 
-	slot_ok = rp < RTL8192F_NUM_TX_DESC;
+	slot_ok = slot < RTL8192F_NUM_TX_DESC;
 
 	off = scnprintf(line, sizeof(line), "tx halt rings:");
 	for (q = 0; q < Q_NUM; q++) {
@@ -2082,10 +2082,10 @@ static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
 	 */
 	if (slot_ok) {
 		spin_lock_irqsave(&priv->irq_lock, flags);
-		stuck_bd = *txbd_of(ring, rp);
+		stuck_bd = *txbd_of(ring, slot);
 		last_bd = *txbd_of(ring, last);
-		if (ring->info[rp].skb) {
-			memcpy(stuck_desc, ring->info[rp].skb->data,
+		if (ring->info[slot].skb) {
+			memcpy(stuck_desc, ring->info[slot].skb->data,
 			       sizeof(stuck_desc));
 			have_desc = true;
 		}
@@ -2100,29 +2100,29 @@ static void rtl8192f_tx_halt_report(struct rtl8192f_soc_priv *priv, int stalled,
 		ret ? "ignores" : "took");
 
 	if (!slot_ok) {
-		dev_err(dev, "tx halt: consumer index %u is outside the ring\n",
-			rp);
+		dev_err(dev, "tx halt: slot %u we wait on is outside the ring\n",
+			slot);
 		return;
 	}
 
 	if (have_desc)
 		dev_err(dev, "tx halt: stalled slot %u txbd %*ph desc %*ph\n",
-			rp, (int)sizeof(stuck_bd), &stuck_bd,
+			slot, (int)sizeof(stuck_bd), &stuck_bd,
 			(unsigned int)sizeof(stuck_desc), stuck_desc);
 	else
 		dev_err(dev,
 			"tx halt: stalled slot %u txbd %*ph, no skb in it\n",
-			rp, (int)sizeof(stuck_bd), &stuck_bd);
+			slot, (int)sizeof(stuck_bd), &stuck_bd);
 	dev_err(dev, "tx halt: last consumed slot %u txbd %*ph\n", last,
 		(int)sizeof(last_bd), &last_bd);
 
-	/* The engine stopped at rp, but what matters is the class of frame it
-	 * will not take, so name the whole unpublished run rather than one
-	 * slot.  Four is enough to tell "one stubborn frame" from "everything
+	/* The reaper is what stopped, so start the run at the oldest
+	 * descriptor we have no completion for and name the whole unpublished
+	 * run rather than one slot.  Four is enough to tell "one stubborn frame" from "everything
 	 * on this queue"; the skbs are stable because the reaper needs the
 	 * same lock this runs under.
 	 */
-	i = rp;
+	i = slot;
 	for (n = 0; n < 4 && i != (ring->head & (RTL8192F_NUM_TX_DESC - 1));
 	     n++) {
 		struct sk_buff *skb = ring->info[i].skb;
@@ -2215,9 +2215,12 @@ static bool rtl8192f_tx_recover(struct rtl8192f_soc_priv *priv, int q,
 
 	priv->tx_last_recover = jiffies;
 	priv->tx_recoveries++;
-	/* Cleared together with the rings, whose cursors .start() re-bases.
+	/* The verdict is measured on our own reclaim progress, so it has to be
+	 * re-armed together with the rings: .start() resets the cursors these
+	 * arrays are compared against.
 	 */
 	memset(priv->tx_stall, 0, sizeof(priv->tx_stall));
+	memset(priv->tx_last_tail, 0, sizeof(priv->tx_last_tail));
 	/* Queues the restart work; it calls back into stop()/start(), which
 	 * cancels and re-arms this work, so nothing is rescheduled here.
 	 */
@@ -2238,11 +2241,12 @@ void rtl8192f_tx_watch(struct work_struct *work)
 	size_t pend_off;
 	bool armed = false, beat;
 	int stalled = -1;
-	int alive = 0;
 	int armed_q = -1;
+	bool progress = false;
 	u32 cs, axi_time, causes;
 	u32 be_idx, hisr0, hisr1;
-	u32 stalled_pending = 0, stalled_rp = 0;
+	u32 stalled_pending = 0, stalled_rp = 0, stalled_wp = 0;
+	u32 stalled_slot = 0;
 	u32 armed_stall = 0, armed_pend = 0, armed_rp = 0, armed_wp = 0;
 	u32 q;
 
@@ -2351,32 +2355,32 @@ void rtl8192f_tx_watch(struct work_struct *work)
 		}
 
 		/*
-		 * The queue is alive the moment the engine's index equals the
-		 * one we published; that equality, not a change between two
-		 * samples, is what the vendor tests
-		 * (((idx >> 16) ^ idx) & 0xffff == 0, 8192cd_sme.c:4148).  Both
-		 * halves are indices modulo the ring length, so a sample taken
-		 * after the engine consumed exactly ring-size * k descriptors
-		 * reads back unchanged while the engine was busy: measured here
-		 * as a "frozen" index that moved again within 100 ms.  Equality
-		 * can only err the other way - a coincidental match clears the
-		 * counter and delays a declaration.
+		 * Liveness is our own reclaim advancing, not the hardware index
+		 * pair agreeing: ring->tail only moves when the engine reports
+		 * TX-done for a descriptor, so a ring with work outstanding whose
+		 * tail has not moved for RTL8192F_TX_WATCH_STALLS passes has not
+		 * had a single completion in that window.
+		 *
+		 * The vendor's rule (8192cd_sme.c:4148) compares the two halves of
+		 * the index register - ((idx >> 16) ^ idx) & 0xffff == 0 means the
+		 * engine caught up - and that equality cannot be trusted here after
+		 * a re-arm: measured on this board the read-pointer half stays 0
+		 * while the driver has already reaped the whole ring (tick 120 of
+		 * #276 reads be=0x0000004c with every ring empty), and in another
+		 * run the pair read 0/0 for seven minutes with five descriptors
+		 * outstanding, so the equality held and no declaration was ever
+		 * made.  The pair is still read, for the report.
 		 */
 		idx = rtl8192f_read32(priv, qr->idx);
 		rp = (idx >> 16) & TXBD_NUM_MASK;
-		if (((idx >> 16) ^ idx) & 0xffff) {
-			if (rp == priv->tx_last_rp[q]) {
-				if (priv->tx_stall[q] <
-				    RTL8192F_TX_WATCH_STALLS)
-					priv->tx_stall[q]++;
-			} else {
-				priv->tx_stall[q] = 0;
-			}
+		if (ring->tail == priv->tx_last_tail[q]) {
+			if (priv->tx_stall[q] < RTL8192F_TX_WATCH_STALLS)
+				priv->tx_stall[q]++;
 		} else {
-			/* Engine has caught up with what we published. */
-			alive = 1;
+			progress = true;
 			priv->tx_stall[q] = 0;
 		}
+		priv->tx_last_tail[q] = ring->tail;
 		priv->tx_last_rp[q] = rp;
 
 		if (priv->tx_stall[q] >= RTL8192F_TX_WATCH_STALLS) {
@@ -2384,6 +2388,8 @@ void rtl8192f_tx_watch(struct work_struct *work)
 			stalled_pending = (ring->head - ring->tail) &
 					  (RTL8192F_NUM_TX_DESC - 1);
 			stalled_rp = rp;
+			stalled_wp = idx & TXBD_NUM_MASK;
+			stalled_slot = ring->tail;
 		} else if (priv->tx_stall[q]) {
 			armed_q = q;
 			armed_stall = priv->tx_stall[q];
@@ -2394,10 +2400,13 @@ void rtl8192f_tx_watch(struct work_struct *work)
 		}
 	}
 
-	if (alive) {
-		/* Any queue the engine is keeping up with means the scheduler
-		 * itself is running, so no ring is hung and every counter is
-		 * dropped - the vendor's rule (8192cd_sme.c:4184).
+	if (progress) {
+		/* A reclaim on any ring means the engine is completing frames, so
+		 * nothing is hung - the escape the vendor uses (8192cd_sme.c:4184),
+		 * decided by our own reaping instead of the index pair, because the
+		 * pair is measurably stale after a re-arm.  A ring that is frozen on
+		 * its own while others drain is a station that stopped taking data,
+		 * not a hung transmitter.
 		 */
 		memset(priv->tx_stall, 0, sizeof(priv->tx_stall));
 		stalled = -1;
@@ -2405,14 +2414,13 @@ void rtl8192f_tx_watch(struct work_struct *work)
 	spin_unlock_irqrestore(&priv->irq_lock, flags);
 
 	if (armed_q >= 0) {
-		/* The four passes before a declaration are the ones no dump ever
+		/* The passes before a declaration are the ones no dump ever
 		 * covered: they say whether the ring's pages ran out and stayed
 		 * out (a queue that cannot be given a page) or whether pages were
 		 * available the whole time (a fetch that stopped being asked), and
-		 * whether the published/read pair already disagreed with our own
-		 * count before the ring was declared hung.  Printed even when the
-		 * rule above masked it, because a stall cleared by another queue
-		 * is itself a fact.
+		 * they carry the index pair next to the reclaim count that decided
+		 * the verdict, so a later reading can tell whether the hardware
+		 * half was stale at the time.
 		 */
 		rtl8192f_tx_page_ledger(priv, pages, sizeof(pages));
 		rtl8192f_tx_tail_state(priv, tail, sizeof(tail));
@@ -2467,9 +2475,10 @@ void rtl8192f_tx_watch(struct work_struct *work)
 	}
 
 	dev_err(&priv->pdev->dev,
-		"tx stall on %s: %u descriptor(s) published, consumer index stuck at %u\n",
-		priv->tx_ring[stalled].name, stalled_pending, stalled_rp);
-	rtl8192f_tx_halt_report(priv, stalled, stalled_rp);
+		"tx stall on %s: %u published, no completion for %u passes (rp=%u wp=%u)\n",
+		priv->tx_ring[stalled].name, stalled_pending,
+		RTL8192F_TX_WATCH_STALLS, stalled_rp, stalled_wp);
+	rtl8192f_tx_halt_report(priv, stalled, stalled_slot);
 	if (rtl8192f_tx_recover(priv, stalled, stalled_pending))
 		return;
 	schedule_delayed_work(&priv->tx_watch, RTL8192F_TX_WATCH_PERIOD);
@@ -2485,6 +2494,8 @@ void rtl8192f_tx_watch_start(struct rtl8192f_soc_priv *priv)
 	u32 rec = FIELD_GET(GENMASK(31, 24), time);
 
 	memset(priv->tx_stall, 0, sizeof(priv->tx_stall));
+	memset(priv->tx_last_tail, 0, sizeof(priv->tx_last_tail));
+	memset(priv->tx_last_rp, 0, sizeof(priv->tx_last_rp));
 	/* Baseline for the AXI probe, and the answer to "is the timeout
 	 * mechanism armed at all on this part": TIME bits[11:0] and [23:12]
 	 * are the TXDMA/RXDMA timeout values, bits[31:24] the recovery time.

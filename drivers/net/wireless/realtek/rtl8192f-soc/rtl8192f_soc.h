@@ -1002,6 +1002,10 @@ struct rtl8192f_soc_priv {
 	 */
 	struct delayed_work tx_watch;
 	u32 tx_last_rp[Q_NUM];
+	/* What reclaim progress the last pass left behind; the stall verdict is
+	 * ring->tail not moving, so this has to be re-armed with the rings.
+	 */
+	u32 tx_last_tail[Q_NUM];
 	u8 tx_stall[Q_NUM];
 	u32 tx_recoveries;
 	unsigned long tx_last_recover;
